@@ -43,9 +43,9 @@ mem0_config = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": "llama3.2:1b", # Use a tiny model here for edge hardware!
+            "model": "llama3.2:1b",
             "temperature": 0.1,
-            "base_url": "http://localhost:11434" # Default Ollama port
+            "base_url": "http://localhost:11434"
         }
     },
     "vector_store": {
@@ -87,17 +87,26 @@ async def enroll_voice(user_id: str = Form(...), file: UploadFile = File(...)):
     try:
         audio_bytes = await file.read()
         audio_io = io.BytesIO(audio_bytes)
-        
+
         signal, fs = torchaudio.load(audio_io)
-        embedding = verification_speaker_model.encode_batch(signal.to(device)).squeeze()
-        
+
+        # FIX #3: Resample to 16kHz if needed
+        if fs != 16000:
+            resampler = torchaudio.transforms.Resample(fs, 16000).to(device)
+            signal = resampler(signal.to(device))
+        else:
+            signal = signal.to(device)
+
+        # FIX #2: squeeze(0) to ensure correct shape [D]
+        embedding = verification_speaker_model.encode_batch(signal).squeeze(0)
+
         # Save to Hard Drive
         embedding_np = embedding.cpu().numpy()
         np.save(f"{user_id}_profile.npy", embedding_np)
-        
+
         # Add to RAM Cache
         profiles_cache[user_id] = embedding
-        
+
         return {"status": "success", "message": f"User '{user_id}' enrolled and cached."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -110,43 +119,49 @@ async def process_audio(file: UploadFile = File(...)):
     try:
         audio_bytes = await file.read()
         audio_io = io.BytesIO(audio_bytes)
-        
+
         signal, fs = torchaudio.load(audio_io)
-        signal_device = signal.to(device)
-        
+
+        # FIX #3: Resample to 16kHz if needed
+        if fs != 16000:
+            resampler = torchaudio.transforms.Resample(fs, 16000).to(device)
+            signal_device = resampler(signal.to(device))
+        else:
+            signal_device = signal.to(device)
+
         # --- A. SPEAKER IDENTIFICATION ---
+        # FIX #2: squeeze(0) for correct embedding shape
         test_embedding = verification_speaker_model.encode_batch(signal_device).squeeze(0)
-        
+
         best_match = "Unknown"
         best_score = 0.0
-        
+
         for known_user, known_embedding in profiles_cache.items():
             similarity = F.cosine_similarity(known_embedding, test_embedding, dim=0)
             score = similarity.item()
             if score > best_score:
                 best_score = score
                 best_match = known_user
-        
+
         identified_user = best_match if best_score > 0.75 else "Unknown"
 
         # --- B. EMOTION RECOGNITION ---
         out_prob, score, index, text_lab = emotion_classifier.classify_batch(signal_device)
         emotion_map = {'ang': 'Angry', 'hap': 'Happy', 'sad': 'Sad', 'neu': 'Neutral'}
         detected_emotion = emotion_map.get(text_lab[0], 'Unknown')
-        
+
         # --- C. WHISPER TRANSCRIPTION ---
-        audio_io.seek(0) 
-       signal_np = signal.squeeze().cpu().numpy()
+        # FIX #1: correct indent + assign text from segments
+        signal_np = signal_device.squeeze().cpu().numpy()
         segments, info = model.transcribe(signal_np, beam_size=5, language="en")
-        
+        text = " ".join([seg.text for seg in list(segments)]).strip()
+
         if not text:
             text = "[No speech detected]"
 
         # --- D. SAVE TO MEM0 ---
         if text != "[No speech detected]" and identified_user != "Unknown":
             print(f"🧠 Sending facts to Mem0 for user: {identified_user}...")
-            
-            # This triggers Ollama to extract the context and save it to ChromaDB
             memory.add(
                 messages=[{"role": "user", "content": text}],
                 user_id=identified_user,
@@ -165,7 +180,7 @@ async def process_audio(file: UploadFile = File(...)):
             "emotion": detected_emotion,
             "transcription": text
         }
-        
+
     except Exception as e:
         print(f"⚠️ Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

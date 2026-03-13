@@ -56,7 +56,7 @@ def create_user(user: UserSchema, db: Session = Depends(get_db)):
 # ใช้ POST สำหรับ Login (เพื่อความปลอดภัยของรหัสผ่าน)
 @app.post("/login")
 def login(user: UserSchema, db: Session = Depends(get_db)):
-    # ดึงข้อมูลจาก DB มาเทียบ
+    # ดึงข้อมูลจาก DB มาเทียบ 
     db_user = db.query(models.User).filter(
         models.User.user_name == user.user_name, 
         models.User.password == user.password

@@ -1,7 +1,7 @@
-fastapi==0.104.1
+fastapi>=0.110.0
 uvicorn==0.24.0
 sqlalchemy==2.0.23
-pydantic==2.5.0
+pydantic>=2.7.3
 faster-whisper==0.10.0
 torch==2.1.1
 torchaudio==2.1.1

@@ -7,3 +7,8 @@ venv/
 .DS_Store
 test.db
 *.sqlite3
+# Model files — too large for GitHub
+pretrained_models/
+wav2vec2_checkpoints/
+memonic_memory/
+*.npy

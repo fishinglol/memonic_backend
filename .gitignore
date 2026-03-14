@@ -12,3 +12,9 @@ pretrained_models/
 wav2vec2_checkpoints/
 memonic_memory/
 *.npy
+pretrained_models/
+wav2vec2_checkpoints/
+memonic_memory/
+*.npy
+__pycache__/
+*.pyc

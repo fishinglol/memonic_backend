@@ -10,6 +10,7 @@ import glob
 import os
 import time
 import asyncio
+import json
 from speechbrain.inference.speaker import SpeakerRecognition
 from speechbrain.inference.classifiers import EncoderClassifier
 from mem0 import Memory
@@ -71,7 +72,7 @@ async def build_summary(user_id: str, transcriptions: list[str]) -> str:
     )
     try:
         response = ollama.chat(
-            model="llama3.2:1b",
+            model="llama3.2:3b",
             messages=[{"role": "user", "content": prompt}]
         )
         return response["message"]["content"].strip()
@@ -144,7 +145,7 @@ async def startup_event():
         "llm": {
             "provider": "ollama",
             "config": {
-                "model": "llama3.2:1b",
+                "model": "llama3.2:3b",
                 "temperature": 0.1,
                 "max_tokens": 2000,
                 "ollama_base_url": "http://localhost:11434"
@@ -342,6 +343,72 @@ async def trigger_summary(user_id: str):
     last_audio_time.pop(user_id, None)
 
     return {"status": "triggered", "summary": summary}
+
+
+# ==========================================
+# 🟣 ENDPOINT 5: GET HOME DATA
+# React Native ดึง highlights + tasks ทุก 5 นาที
+# ==========================================
+@app.get("/api/get-home-data/{user_id}")
+async def get_home_data(user_id: str):
+    try:
+        raw = memory.get_all(user_id=user_id)
+        results = raw.get("results", []) if isinstance(raw, dict) else raw
+
+        if not results:
+            return {
+                "highlights": "Start talking to Memonic to see your highlights.",
+                "tasks": [],
+                "updated_at": None
+            }
+
+        recent = results[-5:] if len(results) >= 5 else results
+        recent_text = "\n".join([
+            r.get("memory", "") if isinstance(r, dict) else str(r) 
+            for r in recent
+        ])
+
+        # Highlights
+        highlight_res = ollama.chat(
+            model="llama3.2:3b",
+            messages=[{"role": "user", "content": (
+                f"Based on these memories:\n{recent_text}\n\n"
+                f"Write ONE short highlight sentence (max 20 words). "
+                f"Be warm and personal. No bullet points."
+            )}]
+        )
+        highlights = highlight_res["message"]["content"].strip()
+
+        # Tasks
+        task_res = ollama.chat(
+            model="llama3.2:3b",
+            messages=[{"role": "user", "content": (
+                f"Based on these memories:\n{recent_text}\n\n"
+                f"Extract 3-4 actionable tasks. "
+                f"Reply ONLY with a JSON array of strings. "
+                f'Example: ["Buy groceries", "Call Sarah"]'
+            )}]
+        )
+        try:
+            task_text = task_res["message"]["content"].strip()
+            # หา JSON array ด้วย regex แทน
+            import re
+            match = re.search(r'\[.*?\]', task_text, re.DOTALL)
+            if match:
+                tasks = json.loads(match.group())
+            else:
+                tasks = ["Check your recent conversations"]
+        except Exception:
+            tasks = ["Check your recent conversations"]
+
+        return {
+            "highlights": highlights,
+            "tasks": tasks,
+            "updated_at": time.time()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

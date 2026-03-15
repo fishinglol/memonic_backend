@@ -72,5 +72,5 @@ def login(user: UserSchema, db: Session = Depends(get_db)):
 
 @app.get("/sessions")
 def get_history(db: Session = Depends(get_db)):
-    history = db.query(models.ChatSession).all()
+    history = db.query(models.ChatMessage).all()
     return history

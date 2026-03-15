@@ -4,7 +4,7 @@ echo "🚀 Setting up Memonic..."
 curl -fsSL https://ollama.com/install.sh | sh
 ollama serve &
 sleep 3
-ollama pull llama3.2:1b
+ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 
 pip install speechbrain --upgrade --break-system-packages

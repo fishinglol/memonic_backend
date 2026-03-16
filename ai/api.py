@@ -73,14 +73,14 @@ async def build_summary(user_id: str, transcriptions: list[str]) -> str:
     )
     try:
         response = ollama.chat(
-            model="llama3.2:3b",
+            model="llama3.2:8b",
             messages=[{"role": "user", "content": prompt}]
         )
         return response["message"]["content"].strip()
     except Exception as e:
         print(f"⚠️  LLM summary failed: {e}")
         return f"Session recorded with {len(transcriptions)} entries."
-
+#this function look weir
 
 async def silence_watcher():
     print("👁️  Silence watcher started.")
@@ -181,6 +181,19 @@ async def enroll_voice(user_id: str = Form(...), file: UploadFile = File(...)):
         audio_io = io.BytesIO(audio_bytes)
         signal, fs = torchaudio.load(audio_io)
 
+        # ✅ Duration check: must be 5–10 seconds
+        duration_seconds = signal.shape[1] / fs
+        if duration_seconds < 5.0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Recording too short ({duration_seconds:.1f}s). Please record at least 5 seconds."
+            )
+        if duration_seconds > 12.0:  # a little buffer over 10s
+            raise HTTPException(
+                status_code=400,
+                detail=f"Recording too long ({duration_seconds:.1f}s). Please keep it under 10 seconds."
+            )
+
         if fs != 16000:
             resampler = torchaudio.transforms.Resample(fs, 16000).to(device)
             signal = resampler(signal.to(device))
@@ -192,7 +205,13 @@ async def enroll_voice(user_id: str = Form(...), file: UploadFile = File(...)):
         np.save(f"{user_id}_profile.npy", embedding_np)
         profiles_cache[user_id] = embedding
 
-        return {"status": "success", "message": f"User '{user_id}' enrolled and cached."}
+        return {
+            "status": "success",
+            "message": f"User '{user_id}' enrolled.",
+            "duration": round(duration_seconds, 2)
+        }
+    except HTTPException:
+        raise  # re-raise your own validation errors
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -253,6 +272,7 @@ async def process_audio(file: UploadFile = File(...)):
             text = "[No speech detected]"
 
         # --- D. SAVE DIRECTLY TO CHROMADB ---
+        #fix if new user didn't have any user_member yet
         if text != "[No speech detected]" and identified_user != "Unknown":
             print(f"🧠 Saving to ChromaDB for user: {identified_user}...")
             import uuid
@@ -322,6 +342,7 @@ async def trigger_summary(user_id: str):
 # 🟣 ENDPOINT 5: GET HOME DATA
 # ==========================================
 @app.get("/api/get-home-data/{user_id}")
+#this function look weir also
 async def get_home_data(user_id: str):
     try:
         results = chroma_collection.get(where={"user_id": user_id})

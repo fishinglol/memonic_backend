@@ -1,9 +1,13 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func as sql_func
 from pydantic import BaseModel
+from typing import Optional, List
 import models
 from database import SessionLocal, engine, Base
 from fastapi.middleware.cors import CORSMiddleware
+import requests
+import uuid
 
 # สร้าง Table ในฐานข้อมูล (memonic.db)
 models.Base.metadata.create_all(bind=engine)
@@ -12,10 +16,14 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # ในช่วงพัฒนาใส่ * เพื่อให้เข้าถึงได้ทุกที่
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Ollama Configuration ---
+OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "llama3.2:3b"
 
 # Dependency สำหรับดึง DB Session
 def get_db():
@@ -25,7 +33,25 @@ def get_db():
     finally:
         db.close()
 
-# --- Pydantic Models (สำหรับรับ-ส่งข้อมูล JSON) ---
+# --- Ollama Helper ---
+def call_ollama(messages: list) -> str:
+    """Call Ollama llama3.2:3b and return the AI response text."""
+    try:
+        resp = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": False,
+        }, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("message", {}).get("content", "Sorry, I couldn't generate a response.")
+    except requests.exceptions.ConnectionError:
+        return "⚠️ Cannot connect to Ollama. Please make sure it is running (ollama serve)."
+    except Exception as e:
+        return f"⚠️ Error from AI: {str(e)}"
+
+
+# --- Pydantic Models ---
 class UserSchema(BaseModel):
     user_name: str
     password: str
@@ -36,39 +62,157 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# --- Endpoints ---
+class ChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str
 
-# ใช้ POST สำหรับ Signin (สมัครสมาชิก)
+class ChatMessageOut(BaseModel):
+    role: str
+    content: str
+    timestamp: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class SessionOut(BaseModel):
+    session_id: str
+    title: str
+    created_at: Optional[str] = None
+
+
+# --- Auth Endpoints ---
+
 @app.post("/signin", response_model=UserResponse)
 def create_user(user: UserSchema, db: Session = Depends(get_db)):
-    # 1. เช็คว่ามี User นี้อยู่หรือยัง
     exists = db.query(models.User).filter(models.User.user_name == user.user_name).first()
     if exists:
         raise HTTPException(status_code=400, detail="User already exists")
-    
-    # 2. บันทึกลง Database
     new_user = models.User(user_name=user.user_name, password=user.password)
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
     return new_user
 
-# ใช้ POST สำหรับ Login (เพื่อความปลอดภัยของรหัสผ่าน)
 @app.post("/login")
 def login(user: UserSchema, db: Session = Depends(get_db)):
-    # ดึงข้อมูลจาก DB มาเทียบ 
     db_user = db.query(models.User).filter(
-        models.User.user_name == user.user_name, 
+        models.User.user_name == user.user_name,
         models.User.password == user.password
     ).first()
-
     if not db_user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password"
         )
-    
     return {"message": "Login successful", "user_id": db_user.id}
+
+
+# --- Chat Endpoints ---
+
+@app.post("/api/chat")
+def chat(req: ChatRequest, db: Session = Depends(get_db)):
+    """Send a message, get an AI reply via Ollama, and persist both to the DB."""
+    # Generate a new session if none provided
+    sid = req.session_id or str(uuid.uuid4())
+
+    # Save user message
+    user_msg = models.ChatMessage(session_id=sid, role="user", content=req.message)
+    db.add(user_msg)
+    db.commit()
+
+    # Build conversation history for Ollama (load all prior messages in this session)
+    history = (
+        db.query(models.ChatMessage)
+        .filter(models.ChatMessage.session_id == sid)
+        .order_by(models.ChatMessage.timestamp)
+        .all()
+    )
+    ollama_messages = [
+        {"role": "assistant" if m.role == "ai" else m.role, "content": m.content}
+        for m in history
+    ]
+
+    # Call Ollama
+    ai_text = call_ollama(ollama_messages)
+
+    # Save AI response
+    ai_msg = models.ChatMessage(session_id=sid, role="ai", content=ai_text)
+    db.add(ai_msg)
+    db.commit()
+
+    # Derive title from first user message in this session
+    first_msg = (
+        db.query(models.ChatMessage)
+        .filter(models.ChatMessage.session_id == sid, models.ChatMessage.role == "user")
+        .order_by(models.ChatMessage.timestamp)
+        .first()
+    )
+    title = (first_msg.content[:50] + "...") if first_msg and len(first_msg.content) > 50 else (first_msg.content if first_msg else "New Chat")
+
+    return {"session_id": sid, "reply": ai_text, "title": title}
+
+
+@app.get("/api/chat/sessions")
+def get_chat_sessions(db: Session = Depends(get_db)):
+    """List all chat sessions with their auto-generated titles."""
+    # Get distinct session_ids
+    session_ids = (
+        db.query(models.ChatMessage.session_id)
+        .distinct()
+        .all()
+    )
+
+    sessions = []
+    for (sid,) in session_ids:
+        # Get first user message as the title
+        first_msg = (
+            db.query(models.ChatMessage)
+            .filter(models.ChatMessage.session_id == sid, models.ChatMessage.role == "user")
+            .order_by(models.ChatMessage.timestamp)
+            .first()
+        )
+        # Get the earliest timestamp
+        earliest = (
+            db.query(sql_func.min(models.ChatMessage.timestamp))
+            .filter(models.ChatMessage.session_id == sid)
+            .scalar()
+        )
+
+        title = "New Chat"
+        if first_msg:
+            title = (first_msg.content[:50] + "...") if len(first_msg.content) > 50 else first_msg.content
+
+        sessions.append({
+            "session_id": sid,
+            "title": title,
+            "created_at": str(earliest) if earliest else None,
+        })
+
+    # Sort newest first
+    sessions.sort(key=lambda s: s["created_at"] or "", reverse=True)
+    return sessions
+
+
+@app.get("/api/chat/sessions/{session_id}")
+def get_session_messages(session_id: str, db: Session = Depends(get_db)):
+    """Get all messages for a specific chat session."""
+    messages = (
+        db.query(models.ChatMessage)
+        .filter(models.ChatMessage.session_id == session_id)
+        .order_by(models.ChatMessage.timestamp)
+        .all()
+    )
+    if not messages:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return [
+        {
+            "role": m.role,
+            "content": m.content,
+            "timestamp": str(m.timestamp) if m.timestamp else None,
+        }
+        for m in messages
+    ]
+
 
 @app.get("/sessions")
 def get_history(db: Session = Depends(get_db)):

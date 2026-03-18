@@ -57,8 +57,14 @@ def load_all_profiles():
 
 
 def load_audio_bytes(audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
-    audio_io = io.BytesIO(audio_bytes)
-    signal, fs = torchaudio.load(audio_io)
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(audio_bytes)
+        tmp_path = f.name
+    try:
+        signal, fs = torchaudio.load(tmp_path)
+    finally:
+        os.unlink(tmp_path)
     return signal, fs
 
 

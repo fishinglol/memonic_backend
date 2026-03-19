@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sql_func
 from pydantic import BaseModel
@@ -8,9 +8,6 @@ from database import SessionLocal, engine, Base
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import uuid
-
-# AI server URL (ai/api.py runs on port 8000)
-AI_SERVER_URL = "http://localhost:8000"
 
 # สร้าง Table ในฐานข้อมูล (memonic.db)
 models.Base.metadata.create_all(bind=engine)
@@ -221,23 +218,3 @@ def get_session_messages(session_id: str, db: Session = Depends(get_db)):
 def get_history(db: Session = Depends(get_db)):
     history = db.query(models.ChatMessage).all()
     return history
-
-
-# --- Proxy to AI Server ---
-
-@app.post("/api/enroll")
-async def proxy_enroll(user_id: str = Form(...), file: UploadFile = File(...)):
-    """Proxy /api/enroll to the AI server so frontend only needs one URL."""
-    try:
-        audio_bytes = await file.read()
-        resp = requests.post(
-            f"{AI_SERVER_URL}/api/enroll",
-            data={"user_id": user_id},
-            files={"file": (file.filename, audio_bytes, file.content_type or "audio/mp4")},
-            timeout=30,
-        )
-        return resp.json()
-    except requests.exceptions.ConnectionError:
-        raise HTTPException(status_code=502, detail="AI server is not running. Start it with: cd ai && uvicorn api:app --port 8000")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

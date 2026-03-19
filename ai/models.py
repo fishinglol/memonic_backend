@@ -24,7 +24,7 @@ async def init_models(device: str = "cpu", whisper_name: str = "small",
     global _whisper, _speaker, _emotion
     _device = device
     try:
-        _whisper = WhisperModel(whisper_name, device=device, compute_type="int8")
+        _whisper = WhisperModel(whisper_name, device=device, compute_type="float32")
     except Exception:
         _whisper = None
 

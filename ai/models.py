@@ -56,9 +56,15 @@ def load_all_profiles():
         profiles_cache[user_id] = torch.from_numpy(enrolled_np).to(_device)
 
 
-def load_audio_bytes(audio_bytes: bytes) -> Tuple[torch.Tensor, int]:
+def load_audio_bytes(audio_bytes: bytes, filename: str = "audio.wav") -> Tuple[torch.Tensor, int]:
     import tempfile, os
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+    
+    # ดึงนามสกุลไฟล์ออกมาใช้งาน (เพื่อรองรับทั้ง .m4a, .mp3, .wav ฯลฯ)
+    ext = os.path.splitext(filename)[1]
+    if not ext:
+        ext = ".wav"
+        
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
         f.write(audio_bytes)
         tmp_path = f.name
     try:

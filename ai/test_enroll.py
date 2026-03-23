@@ -129,8 +129,7 @@ class TestEnrollEndpoint:
         mock_load.return_value = self._make_signal(3.0)
 
         res = enroll_client.post(
-            "/api/enroll",
-            data={"user_id": "testuser"},
+            "/api/enroll/testuser",
             files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
         )
 
@@ -147,8 +146,7 @@ class TestEnrollEndpoint:
         mock_load.return_value = self._make_signal(15.0)
 
         res = enroll_client.post(
-            "/api/enroll",
-            data={"user_id": "testuser"},
+            "/api/enroll/testuser",
             files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
         )
 
@@ -165,8 +163,7 @@ class TestEnrollEndpoint:
         mock_load.return_value = self._make_signal(7.0)
 
         res = enroll_client.post(
-            "/api/enroll",
-            data={"user_id": "testuser"},
+            "/api/enroll/testuser",
             files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
         )
 
@@ -186,8 +183,7 @@ class TestEnrollEndpoint:
         mock_load.return_value = self._make_signal(5.0)
 
         res = enroll_client.post(
-            "/api/enroll",
-            data={"user_id": "boundary5"},
+            "/api/enroll/boundary5",
             files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
         )
 
@@ -202,8 +198,7 @@ class TestEnrollEndpoint:
         mock_load.return_value = self._make_signal(12.0)
 
         res = enroll_client.post(
-            "/api/enroll",
-            data={"user_id": "boundary12"},
+            "/api/enroll/boundary12",
             files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
         )
 

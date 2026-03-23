@@ -49,11 +49,14 @@ async def startup_event():
     asyncio.create_task(memory.silence_watcher())
 
 
-@app.post("/api/enroll")
-async def enroll_voice(user_id: str = Form(...), file: UploadFile = File(...)):
+@app.post("/api/enroll/{user_id}")
+async def enroll_voice(user_id: str, file: UploadFile = File(...)):
     try:
         audio_bytes = await file.read()
-        signal, fs = models.load_audio_bytes(audio_bytes)
+        
+        # ส่ง file.filename เข้าไปเพื่อให้รู้จักนามสกุลไฟล์
+        signal, fs = models.load_audio_bytes(audio_bytes, file.filename)
+        
         duration_seconds = signal.shape[1] / fs
         if duration_seconds < 5.0 or duration_seconds > 12.0:
             raise HTTPException(status_code=400, detail="Recording length invalid")
@@ -72,7 +75,7 @@ async def enroll_voice(user_id: str = Form(...), file: UploadFile = File(...)):
 async def process_audio(file: UploadFile = File(...)):
     try:
         audio_bytes = await file.read()
-        signal, fs = models.load_audio_bytes(audio_bytes)
+        signal, fs = models.load_audio_bytes(audio_bytes, file.filename)
         if signal.shape[0] > 1:
             signal = models.to_mono(signal)
 

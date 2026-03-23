@@ -80,7 +80,7 @@ def encode_speaker(signal: torch.Tensor) -> torch.Tensor:
 
 
 def save_profile(user_id: str, embedding: torch.Tensor):
-    emb_np = embedding.cpu().numpy()
+    emb_np = embedding.detach().cpu().numpy()
     np.save(f"{user_id}_profile.npy", emb_np)
     profiles_cache[user_id] = embedding
 

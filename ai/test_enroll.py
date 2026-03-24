@@ -128,9 +128,11 @@ class TestEnrollEndpoint:
         """Audio <5s → 400 'Recording length invalid'."""
         mock_load.return_value = self._make_signal(3.0)
 
+        import base64
+        fake_b64 = base64.b64encode(b"\x00" * 100).decode("utf-8")
         res = enroll_client.post(
-            "/api/enroll/testuser",
-            files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
+            "/api/enroll",
+            json={"user_id": "testuser", "file_ext": ".m4a", "audio_base64": fake_b64},
         )
 
         assert res.status_code == 400
@@ -145,9 +147,11 @@ class TestEnrollEndpoint:
         """Audio >12s → 400 'Recording length invalid'."""
         mock_load.return_value = self._make_signal(15.0)
 
+        import base64
+        fake_b64 = base64.b64encode(b"\x00" * 100).decode("utf-8")
         res = enroll_client.post(
-            "/api/enroll/testuser",
-            files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
+            "/api/enroll",
+            json={"user_id": "testuser", "file_ext": ".m4a", "audio_base64": fake_b64},
         )
 
         assert res.status_code == 400
@@ -162,9 +166,11 @@ class TestEnrollEndpoint:
         """Audio 7s → 200 + success + correct duration."""
         mock_load.return_value = self._make_signal(7.0)
 
+        import base64
+        fake_b64 = base64.b64encode(b"\x00" * 100).decode("utf-8")
         res = enroll_client.post(
-            "/api/enroll/testuser",
-            files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
+            "/api/enroll",
+            json={"user_id": "testuser", "file_ext": ".m4a", "audio_base64": fake_b64},
         )
 
         assert res.status_code == 200
@@ -182,9 +188,11 @@ class TestEnrollEndpoint:
         """Audio exactly 5.0s → valid (lower boundary)."""
         mock_load.return_value = self._make_signal(5.0)
 
+        import base64
+        fake_b64 = base64.b64encode(b"\x00" * 100).decode("utf-8")
         res = enroll_client.post(
-            "/api/enroll/boundary5",
-            files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
+            "/api/enroll",
+            json={"user_id": "boundary5", "file_ext": ".m4a", "audio_base64": fake_b64},
         )
 
         assert res.status_code == 200
@@ -197,9 +205,11 @@ class TestEnrollEndpoint:
         """Audio exactly 12.0s → valid (upper boundary)."""
         mock_load.return_value = self._make_signal(12.0)
 
+        import base64
+        fake_b64 = base64.b64encode(b"\x00" * 100).decode("utf-8")
         res = enroll_client.post(
-            "/api/enroll/boundary12",
-            files={"file": ("test.m4a", b"\x00" * 100, "audio/mp4")},
+            "/api/enroll",
+            json={"user_id": "boundary12", "file_ext": ".m4a", "audio_base64": fake_b64},
         )
 
         assert res.status_code == 200

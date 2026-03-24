@@ -1,7 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import io
+import base64
 import time
 
 try:
@@ -46,25 +47,33 @@ async def startup_event():
     models.load_all_profiles()
     # start silence watcher
     import asyncio
-    asyncio.create_task(memory.silence_watcher())
+class EnrollRequest(BaseModel):
+    user_id: str
+    file_ext: str
+    audio_base64: str
+
+class ProcessAudioRequest(BaseModel):
+    file_ext: str
+    audio_base64: str
 
 
-@app.post("/api/enroll/{user_id}")
-async def enroll_voice(user_id: str, file: UploadFile = File(...)):
+@app.post("/api/enroll")
+async def enroll_voice(req: EnrollRequest):
     try:
-        audio_bytes = await file.read()
+        audio_bytes = base64.b64decode(req.audio_base64)
         
-        # ส่ง file.filename เข้าไปเพื่อให้รู้จักนามสกุลไฟล์
-        signal, fs = models.load_audio_bytes(audio_bytes, file.filename)
+        # ส่ง filename เป็น dummy name + file_ext ขึ้นมา
+        filename = f"audio{req.file_ext}"
+        signal, fs = models.load_audio_bytes(audio_bytes, filename)
         
         duration_seconds = signal.shape[1] / fs
         if duration_seconds < 5.0 or duration_seconds > 12.0:
             raise HTTPException(status_code=400, detail="Recording length invalid")
 
         embedding = models.encode_speaker(signal)
-        models.save_profile(user_id, embedding)
+        models.save_profile(req.user_id, embedding)
 
-        return {"status": "success", "message": f"User '{user_id}' enrolled.", "duration": round(duration_seconds,2)}
+        return {"status": "success", "message": f"User '{req.user_id}' enrolled.", "duration": round(duration_seconds,2)}
     except HTTPException:
         raise
     except Exception as e:
@@ -72,10 +81,11 @@ async def enroll_voice(user_id: str, file: UploadFile = File(...)):
 
 
 @app.post("/api/process-audio")
-async def process_audio(file: UploadFile = File(...)):
+async def process_audio(req: ProcessAudioRequest):
     try:
-        audio_bytes = await file.read()
-        signal, fs = models.load_audio_bytes(audio_bytes, file.filename)
+        audio_bytes = base64.b64decode(req.audio_base64)
+        filename = f"audio{req.file_ext}"
+        signal, fs = models.load_audio_bytes(audio_bytes, filename)
         if signal.shape[0] > 1:
             signal = models.to_mono(signal)
 

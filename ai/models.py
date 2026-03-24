@@ -1,5 +1,6 @@
 import io
 import glob
+import os
 import numpy as np
 import torch
 import torchaudio
@@ -48,10 +49,14 @@ async def init_models(device: str = "cpu", whisper_name: str = "small",
 
 
 def load_all_profiles():
-    # Load any saved *_profile.npy files into RAM cache
-    npy_files = glob.glob("*_profile.npy")
+    # Load any saved *_profile.npy files from member_voice folder into RAM cache
+    member_voice_dir = "member_voice"
+    if not os.path.exists(member_voice_dir):
+        return
+    npy_files = glob.glob(os.path.join(member_voice_dir, "*_profile.npy"))
     for file_path in npy_files:
-        user_id = file_path.replace("_profile.npy", "")
+        filename = os.path.basename(file_path)
+        user_id = filename.replace("_profile.npy", "")
         enrolled_np = np.load(file_path)
         profiles_cache[user_id] = torch.from_numpy(enrolled_np).to(_device)
 
@@ -86,8 +91,14 @@ def encode_speaker(signal: torch.Tensor) -> torch.Tensor:
 
 
 def save_profile(user_id: str, embedding: torch.Tensor):
+    # Save .npy files to member_voice folder
+    member_voice_dir = "member_voice"
+    if not os.path.exists(member_voice_dir):
+        os.makedirs(member_voice_dir, exist_ok=True)
+    
     emb_np = embedding.detach().cpu().numpy()
-    np.save(f"{user_id}_profile.npy", emb_np)
+    file_path = os.path.join(member_voice_dir, f"{user_id}_profile.npy")
+    np.save(file_path, emb_np)
     profiles_cache[user_id] = embedding
 
 

@@ -159,5 +159,16 @@ async def list_members():
     return sorted(members)
 
 
+@app.delete("/api/voice-profile/{user_id}")
+async def delete_voice_profile(user_id: str):
+    import os
+    file_path = f"member_voice/{user_id}_profile.npy"
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return {"status": "success", "message": f"Voice profile for '{user_id}' deleted."}
+    else:
+        raise HTTPException(status_code=404, detail="Voice profile not found")
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

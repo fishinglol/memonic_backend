@@ -62,6 +62,11 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class ChangePasswordRequest(BaseModel):
+    user_name: str
+    current_password: str
+    new_password: str
+
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     message: str
@@ -104,6 +109,37 @@ def login(user: UserSchema, db: Session = Depends(get_db)):
             detail="Invalid username or password"
         )
     return {"message": "Login successful", "user_id": db_user.id}
+
+
+@app.put("/api/change-password")
+def change_password(req: ChangePasswordRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(
+        models.User.user_name == req.user_name,
+        models.User.password == req.current_password
+    ).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid current password or username"
+        )
+    
+    db_user.password = req.new_password
+    db.commit()
+    return {"message": "Password updated successfully"}
+
+
+@app.delete("/api/account/{user_name}")
+def delete_account(user_name: str, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.user_name == user_name).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Optional: Delete chat records for this user. 
+    # Current chat schema groups by session_id, we might not have user_id linked directly in ChatMessage yet,
+    # but we can just delete the user.
+    db.delete(db_user)
+    db.commit()
+    return {"message": "Account deleted successfully"}
 
 
 # --- Chat Endpoints ---

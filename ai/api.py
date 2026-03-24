@@ -141,5 +141,23 @@ async def get_mood(user_id: str):
     return await memory.get_mood(user_id)
 
 
+@app.get("/api/members")
+async def list_members():
+    """List all users who have enrolled their voice."""
+    import os, glob
+    member_voice_dir = "member_voice"
+    if not os.path.exists(member_voice_dir):
+        return []
+    
+    npy_files = glob.glob(os.path.join(member_voice_dir, "*_profile.npy"))
+    members = []
+    for file_path in npy_files:
+        filename = os.path.basename(file_path)
+        user_id = filename.replace("_profile.npy", "")
+        members.append(user_id)
+    
+    return sorted(members)
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

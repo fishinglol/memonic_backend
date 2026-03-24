@@ -144,6 +144,27 @@ def delete_account(user_name: str, db: Session = Depends(get_db)):
 
 # --- Chat Endpoints ---
 
+@app.get("/api/members")
+def list_members():
+    import os, glob
+    # Look into the AI folder's member_voice directory
+    member_voice_dir = os.path.join(os.path.dirname(__file__), "..", "ai", "member_voice")
+    if not os.path.exists(member_voice_dir):
+        # Also try the root member_voice if it exists
+        member_voice_dir = os.path.join(os.path.dirname(__file__), "..", "member_voice")
+        if not os.path.exists(member_voice_dir):
+            return []
+    
+    npy_files = glob.glob(os.path.join(member_voice_dir, "*_profile.npy"))
+    members = []
+    for file_path in npy_files:
+        filename = os.path.basename(file_path)
+        user_id = filename.replace("_profile.npy", "")
+        members.append(user_id)
+    
+    return sorted(members)
+
+
 @app.post("/api/chat")
 def chat(req: ChatRequest, db: Session = Depends(get_db)):
     """Send a message, get an AI reply via Ollama, and persist both to the DB."""

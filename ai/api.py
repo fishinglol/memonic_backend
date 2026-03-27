@@ -30,8 +30,7 @@ except Exception:
 app = FastAPI()
 
 # ── In-memory device status (updated by ESP32, read by the app) ──
-device_status = {"bracelet": "Disconnected", "dock": "Disconnected"}
-
+device_state = {"bracelet_last_seen": 0.0}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -175,20 +174,25 @@ async def delete_voice_profile(user_id: str):
 
 # ── ESP32 Device Status ──────────────────────────────────────────
 class DeviceStatusUpdate(BaseModel):
-    bracelet: str = "Disconnected"
-    dock: str = "Disconnected"
+    bracelet: str = "Connected"
+    dock: str = "Connected"
 
 @app.post("/update")
 async def update_device(data: DeviceStatusUpdate):
     """ESP32 calls this to push bracelet & dock status."""
-    device_status["bracelet"] = data.bracelet
-    device_status["dock"] = data.dock
+    device_state["bracelet_last_seen"] = time.time()
     return {"status": "ok"}
 
 @app.get("/device-status")
 async def get_device_status():
     """App calls this to read latest ESP32 values."""
-    return device_status
+    # If the ESP32 pinged in the last 15 seconds, it's alive.
+    is_alive = (time.time() - device_state["bracelet_last_seen"]) < 15
+    
+    return {
+        "bracelet": "Connected" if is_alive else "Disconnected",
+        "dock": "Connected"
+    }
 
 
 if __name__ == "__main__":

@@ -29,6 +29,9 @@ except Exception:
 
 app = FastAPI()
 
+# ── In-memory device status (updated by ESP32, read by the app) ──
+device_status = {"bracelet": "Disconnected", "dock": "Disconnected"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -168,6 +171,24 @@ async def delete_voice_profile(user_id: str):
         return {"status": "success", "message": f"Voice profile for '{user_id}' deleted."}
     else:
         raise HTTPException(status_code=404, detail="Voice profile not found")
+
+
+# ── ESP32 Device Status ──────────────────────────────────────────
+class DeviceStatusUpdate(BaseModel):
+    bracelet: str = "Disconnected"
+    dock: str = "Disconnected"
+
+@app.post("/update")
+async def update_device(data: DeviceStatusUpdate):
+    """ESP32 calls this to push bracelet & dock status."""
+    device_status["bracelet"] = data.bracelet
+    device_status["dock"] = data.dock
+    return {"status": "ok"}
+
+@app.get("/device-status")
+async def get_device_status():
+    """App calls this to read latest ESP32 values."""
+    return device_status
 
 
 if __name__ == "__main__":

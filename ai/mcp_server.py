@@ -1,33 +1,19 @@
 from fastmcp import FastMCP
-from mem0 import Memory
 import chromadb
+import ollama
+import uuid
+import time
+
+try:
+    from .config import CHROMA_PATH, EMBEDDING_MODEL, LLM_MODEL_SUMMARY
+except Exception:
+    from config import CHROMA_PATH, EMBEDDING_MODEL, LLM_MODEL_SUMMARY
 
 # ==========================================
-# SETUP: Connect to existing ChromaDB
-# (same config as api.py — no duplication)
+# SETUP: Connect to the SAME ChromaDB used by api.py / memory.py
+# No more mem0 — everything reads/writes the same collection.
 # ==========================================
-mem0_config = {
-    "llm": {
-        "provider": "ollama",
-        "config": {
-            "model": "llama3.2:1b",
-            "temperature": 0.1,
-            "base_url": "http://localhost:11434"
-        }
-    },
-    "vector_store": {
-        "provider": "chroma",
-        "config": {
-            "collection_name": "memonic_memory",
-            "path": "./memonic_memory",  # Same path as api.py
-        }
-    }
-}
-
-memory = Memory.from_config(config_dict=mem0_config)
-
-# Raw ChromaDB client for direct queries (faster, no LLM overhead)
-chroma_client = chromadb.PersistentClient(path="./memonic_memory")
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 collection = chroma_client.get_or_create_collection("memonic_memory")
 
 # ==========================================
@@ -48,18 +34,31 @@ def search_memory(query: str, user_id: str, limit: int = 5) -> str:
         limit: Max number of results to return (default 5)
     """
     try:
-        results = memory.search(query, user_id=user_id, limit=limit)
-        if not results:
+        # Generate embedding using the same model as memory.py
+        res = ollama.embed(model=EMBEDDING_MODEL, input=query)
+        query_embedding = res["embeddings"][0]
+
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            where={"user_id": user_id},
+            n_results=limit,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        documents = results.get("documents", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+
+        if not documents:
             return f"No memories found for user '{user_id}' matching '{query}'"
 
         formatted = []
-        for i, r in enumerate(results, 1):
-            mem_text = r.get("memory", "")
-            score = r.get("score", 0)
-            metadata = r.get("metadata", {})
-            emotion = metadata.get("emotion", "Unknown")
+        for i, (doc, meta, dist) in enumerate(zip(documents, metadatas, distances), 1):
+            emotion = meta.get("emotion", "Unknown") if meta else "Unknown"
+            # ChromaDB returns L2 distance; convert to a rough similarity score
+            score = max(0, 1 - dist / 2)
             formatted.append(
-                f"{i}. [{emotion}] (score: {score:.2f}) {mem_text}"
+                f"{i}. [{emotion}] (score: {score:.2f}) {doc}"
             )
 
         return f"Memories for '{user_id}' about '{query}':\n" + "\n".join(formatted)
@@ -78,22 +77,27 @@ def get_all_memories(user_id: str) -> str:
         user_id: The user's ID
     """
     try:
-        results = memory.get_all(user_id=user_id)
-        if not results:
+        results = collection.get(
+            where={"user_id": user_id},
+            include=["documents", "metadatas"]
+        )
+
+        documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+
+        if not documents:
             return f"No memories found for user '{user_id}'"
 
         formatted = []
-        for i, r in enumerate(results, 1):
-            mem_text = r.get("memory", "")
-            metadata = r.get("metadata", {})
-            emotion = metadata.get("emotion", "Unknown")
-            confidence = metadata.get("speaker_confidence", 0)
+        for i, (doc, meta) in enumerate(zip(documents, metadatas), 1):
+            emotion = meta.get("emotion", "Unknown") if meta else "Unknown"
+            confidence = meta.get("speaker_confidence", 0) if meta else 0
             formatted.append(
-                f"{i}. [emotion: {emotion}, confidence: {confidence:.2f}] {mem_text}"
+                f"{i}. [emotion: {emotion}, confidence: {confidence:.2f}] {doc}"
             )
 
         return (
-            f"All memories for '{user_id}' ({len(results)} total):\n"
+            f"All memories for '{user_id}' ({len(documents)} total):\n"
             + "\n".join(formatted)
         )
 
@@ -105,6 +109,7 @@ def get_all_memories(user_id: str) -> str:
 def add_memory(text: str, user_id: str, emotion: str = "Neutral") -> str:
     """
     Manually add a memory for a user (useful for testing or manual corrections).
+    Uses the same embedding model and ChromaDB collection as the main pipeline.
 
     Args:
         text: The content to remember
@@ -112,10 +117,19 @@ def add_memory(text: str, user_id: str, emotion: str = "Neutral") -> str:
         emotion: Emotional context (Angry/Happy/Sad/Neutral)
     """
     try:
-        memory.add(
-            messages=[{"role": "user", "content": text}],
-            user_id=user_id,
-            metadata={"emotion": emotion, "speaker_confidence": 1.0, "source": "manual"}
+        res = ollama.embed(model=EMBEDDING_MODEL, input=text)
+        collection.add(
+            ids=[str(uuid.uuid4())],
+            embeddings=[res["embeddings"][0]],
+            documents=[text],
+            metadatas=[{
+                "user_id": user_id,
+                "memory": text,
+                "emotion": emotion,
+                "speaker_confidence": 1.0,
+                "timestamp": time.time(),
+                "source": "manual_mcp"
+            }]
         )
         return f"Memory added for '{user_id}': {text}"
 
@@ -133,7 +147,7 @@ def delete_memory(memory_id: str) -> str:
         memory_id: The UUID of the memory to delete
     """
     try:
-        memory.delete(memory_id)
+        collection.delete(ids=[memory_id])
         return f"Memory '{memory_id}' deleted successfully."
     except Exception as e:
         return f"Error deleting memory: {str(e)}"
@@ -148,7 +162,7 @@ def delete_all_memories(user_id: str) -> str:
         user_id: The user's ID to wipe
     """
     try:
-        memory.delete_all(user_id=user_id)
+        collection.delete(where={"user_id": user_id})
         return f"All memories for '{user_id}' have been deleted."
     except Exception as e:
         return f"Error deleting memories: {str(e)}"
@@ -161,7 +175,6 @@ def list_users() -> str:
     Useful for seeing who Memonic knows about.
     """
     try:
-        # Query ChromaDB directly — faster than going through mem0
         results = collection.get(include=["metadatas"])
         metadatas = results.get("metadatas", [])
 
@@ -220,5 +233,6 @@ def get_memory_stats() -> str:
 # ==========================================
 if __name__ == "__main__":
     print("🧠 Memonic MCP Server starting...")
-    print("   Connecting to ChromaDB at ./memonic_memory")
+    print(f"   Connecting to ChromaDB at {CHROMA_PATH}")
+    print(f"   Embedding model: {EMBEDDING_MODEL}")
     mcp.run()  # Default: stdio transport (works with Claude Desktop, Cursor, etc.)

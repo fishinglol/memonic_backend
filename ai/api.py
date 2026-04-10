@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -114,6 +114,55 @@ async def process_audio(req: ProcessAudioRequest):
             "transcription": text,
         }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/esp32-audio")
+async def esp32_audio(request: Request):
+    """
+    Receive raw WAV bytes from the ESP32 bracelet (no base64).
+    Run full pipeline: speaker ID → emotion → transcription → LLM summary → save to memory.
+    Triggers a popup for the mobile app via check-popup polling.
+    """
+    try:
+        audio_bytes = await request.body()
+        if len(audio_bytes) < 44:
+            raise HTTPException(status_code=400, detail="Audio too short (need WAV with header)")
+
+        signal, fs = models.load_audio_bytes(audio_bytes, "audio.wav")
+        if signal.shape[0] > 1:
+            signal = models.to_mono(signal)
+
+        # Speaker identification
+        test_embedding = models.encode_speaker(signal)
+        identified_user, best_score = models.match_speaker(test_embedding)
+
+        # Emotion detection
+        detected_emotion = models.classify_emotion(signal)
+
+        # Transcription
+        text = models.transcribe(signal)
+        if not text:
+            text = "[No speech detected]"
+
+        summary = ""
+        if text != "[No speech detected]" and identified_user != "Unknown":
+            # Save to ChromaDB (feeds fetchHomeData, fetchEvents, fetchMood)
+            memory.save_memory(identified_user, text, detected_emotion, best_score)
+            # Generate immediate LLM summary and store popup (feeds popupInterval in mobile app)
+            summary = await memory.summarize_and_popup(identified_user, text, detected_emotion)
+
+        return {
+            "identified_user": identified_user,
+            "speaker_confidence": round(best_score, 4),
+            "emotion": detected_emotion,
+            "transcription": text,
+            "summary": summary,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

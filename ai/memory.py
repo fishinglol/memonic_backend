@@ -7,9 +7,9 @@ import chromadb
 import ollama
 from typing import Dict, List, Optional
 try:
-    from .config import SILENCE_CHECK_INTERVAL, SILENCE_THRESHOLD_SECONDS, MIN_WORDS_TO_SUMMARIZE
+    from .config import SILENCE_CHECK_INTERVAL, SILENCE_THRESHOLD_SECONDS, MIN_WORDS_TO_SUMMARIZE, EMBEDDING_MODEL, LLM_MODEL_SUMMARY
 except Exception:
-    from config import SILENCE_CHECK_INTERVAL, SILENCE_THRESHOLD_SECONDS, MIN_WORDS_TO_SUMMARIZE
+    from config import SILENCE_CHECK_INTERVAL, SILENCE_THRESHOLD_SECONDS, MIN_WORDS_TO_SUMMARIZE, EMBEDDING_MODEL, LLM_MODEL_SUMMARY
 
 # Runtime memory structures
 chroma_client = None
@@ -34,7 +34,7 @@ async def build_summary(user_id: str, transcriptions: List[str]) -> str:
         f"End with a brief encouraging remark. Keep under 40 words."
     )
     try:
-        response = ollama.chat(model="llama3.2:8b", messages=[{"role": "user", "content": prompt}])
+        response = ollama.chat(model=LLM_MODEL_SUMMARY, messages=[{"role": "user", "content": prompt}])
         return response["message"]["content"].strip()
     except Exception:
         return f"Session recorded with {len(transcriptions)} entries."
@@ -44,7 +44,7 @@ def save_memory(user_id: str, text: str, emotion: str, speaker_confidence: float
     global chroma_collection, session_buffer, last_audio_time, popup_store
     if chroma_collection is None:
         return
-    res = ollama.embed(model="nomic-embed-text", input=text)
+    res = ollama.embed(model=EMBEDDING_MODEL, input=text)
     chroma_collection.add(
         ids=[str(uuid.uuid4())],
         embeddings=[res["embeddings"][0]],
@@ -59,6 +59,30 @@ def save_memory(user_id: str, text: str, emotion: str, speaker_confidence: float
     )
     last_audio_time[user_id] = time.time()
     session_buffer.setdefault(user_id, []).append(text)
+
+
+async def summarize_and_popup(user_id: str, text: str, emotion: str) -> str:
+    """
+    Generate an immediate LLM summary for a single transcription from the ESP32
+    and store it as a popup so the mobile app picks it up via check-popup polling.
+    """
+    prompt = (
+        f"You are Memonic, a personal voice memory assistant. "
+        f"The user '{user_id}' just said something. Their detected emotion is '{emotion}'.\n\n"
+        f"What they said: \"{text}\"\n\n"
+        f"Write a short, warm 1-2 sentence summary acknowledging what they said. "
+        f"If the emotion is notable (Happy/Sad/Angry), briefly reflect it. "
+        f"Keep under 30 words. No quotes."
+    )
+    try:
+        response = ollama.chat(model=LLM_MODEL_SUMMARY, messages=[{"role": "user", "content": prompt}])
+        summary = response["message"]["content"].strip()
+    except Exception:
+        summary = f"Heard from {user_id}: {text[:80]}"
+
+    # Store in popup_store so the mobile app picks it up via /api/check-popup
+    popup_store[user_id] = summary
+    return summary
 
 
 async def silence_watcher():

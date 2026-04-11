@@ -241,8 +241,8 @@ async def update_device(data: DeviceStatusUpdate):
 @app.get("/device-status")
 async def get_device_status():
     """App calls this to read latest ESP32 values."""
-    # If the ESP32 pinged in the last 15 seconds, it's alive.
-    is_alive = (time.time() - device_state["bracelet_last_seen"]) < 15
+    # If the ESP32 pinged in the last 30 seconds, it's alive.
+    is_alive = (time.time() - device_state["bracelet_last_seen"]) < 30
     
     return {
         "bracelet": "Connected" if is_alive else "Disconnected",

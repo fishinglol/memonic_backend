@@ -258,10 +258,41 @@ async def get_device_status():
     # If the ESP32 pinged in the last 30 seconds, it's alive.
     is_alive = (time.time() - device_state["bracelet_last_seen"]) < 30
     
+
     return {
         "bracelet": "Connected" if is_alive else "Disconnected",
         "dock": "Connected"
     }
+
+
+# ── Test / Dev Helper ────────────────────────────────────────────
+class SeedMemoryRequest(BaseModel):
+    user_id: str = "fish"
+    entries: list = [
+        "I have a meeting with my professor tomorrow at 3 PM about the final project.",
+        "I need to pick up groceries after class. We're out of milk and eggs.",
+        "I'm feeling pretty stressed about the upcoming exam on Friday.",
+        "My friend invited me to play basketball at the gym this Saturday at 10 AM.",
+        "I should call mom tonight. It's been a while since we talked.",
+    ]
+    emotions: list = ["Neutral", "Happy", "Angry", "Happy", "Sad"]
+
+@app.post("/api/test-seed-memory")
+async def test_seed_memory(req: SeedMemoryRequest):
+    """
+    DEV ONLY - Seed fake memories into ChromaDB so the dashboard populates.
+    Delete this endpoint before production!
+    """
+    saved = 0
+    for i, text in enumerate(req.entries):
+        emotion = req.emotions[i] if i < len(req.emotions) else "Neutral"
+        try:
+            memory.save_memory(req.user_id, text, emotion, 0.95)
+            saved += 1
+        except Exception as e:
+            print(f"seed error: {e}")
+    return {"status": "ok", "saved": saved, "user_id": req.user_id}
+# ─────────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":

@@ -126,6 +126,9 @@ async def esp32_audio(request: Request):
     Triggers a popup for the mobile app via check-popup polling.
     """
     try:
+        # Mark bracelet as alive whenever it sends audio
+        device_state["bracelet_last_seen"] = time.time()
+
         audio_bytes = await request.body()
         if len(audio_bytes) < 44:
             raise HTTPException(status_code=400, detail="Audio too short (need WAV with header)")

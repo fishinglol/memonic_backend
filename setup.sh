@@ -1,13 +1,29 @@
 #!/bin/bash
 SESSION="memonic"
 
-echo "🚀 Setting up Memonic on Lightning AI..."
+echo "🚀 Updating and Setting up Memonic on Lightning AI..."
 
-# 1. Start Ollama
-ollama serve > /dev/null 2>&1 &
-sleep 2
+# 1. Update code
+git pull
+
+# 2. Check and Install Ollama if missing
+if ! command -v ollama &> /dev/null; then
+    echo "📦 Ollama not found. Installing..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+# 3. Start Ollama if not running
+if ! pgrep -x "ollama" > /dev/null; then
+    echo "🧠 Starting Ollama service..."
+    ollama serve > /dev/null 2>&1 &
+    sleep 5
+fi
+
+# 4. Pull models (only if needed)
+echo "📥 Checking AI models..."
 ollama pull llama3.2:3b
 ollama pull nomic-embed-text
+
 
 # 2. Python Dependencies
 pip install speechbrain --upgrade --break-system-packages

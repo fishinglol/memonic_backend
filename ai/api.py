@@ -82,6 +82,20 @@ async def enroll_voice(req: EnrollRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/members_voice")
+async def get_members_voice():
+    """Return list of enrolled member names from member_voice/ folder."""
+    import os, glob
+    member_voice_dir = "member_voice"
+    if not os.path.exists(member_voice_dir):
+        return []
+    npy_files = glob.glob(os.path.join(member_voice_dir, "*_profile.npy"))
+    members = []
+    for f in sorted(npy_files):
+        name = os.path.basename(f).replace("_profile.npy", "")
+        members.append(name)
+    return members
+
 @app.post("/api/process-audio")
 async def process_audio(req: ProcessAudioRequest):
     try:

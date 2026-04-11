@@ -7,12 +7,24 @@ import torchaudio
 import torch.nn.functional as F
 
 # ── PyTorch < 2.4 compatibility patch ──────────────────────────
-# SpeechBrain expects torch.amp.custom_fwd which only exists in
-# PyTorch 2.4+.  Lightning AI ships 2.2, so we shim it here.
+# SpeechBrain calls torch.amp.custom_fwd(device_type=...) which
+# only exists in PyTorch 2.4+.  Lightning AI ships 2.2 where it
+# lives under torch.cuda.amp and doesn't accept device_type.
+# This wrapper bridges the two APIs.
 if not hasattr(torch.amp, 'custom_fwd'):
-    torch.amp.custom_fwd = torch.cuda.amp.custom_fwd
-if not hasattr(torch.amp, 'custom_bwd'):
-    torch.amp.custom_bwd = torch.cuda.amp.custom_bwd
+    _orig_custom_fwd = torch.cuda.amp.custom_fwd
+    _orig_custom_bwd = torch.cuda.amp.custom_bwd
+
+    def _compat_custom_fwd(fn=None, *, device_type=None, cast_inputs=None):
+        """Accept device_type (new API) but forward to cuda.amp (old API)."""
+        return _orig_custom_fwd(fn, cast_inputs=cast_inputs)
+
+    def _compat_custom_bwd(fn=None, *, device_type=None):
+        """Accept device_type (new API) but forward to cuda.amp (old API)."""
+        return _orig_custom_bwd(fn)
+
+    torch.amp.custom_fwd = _compat_custom_fwd
+    torch.amp.custom_bwd = _compat_custom_bwd
 # ────────────────────────────────────────────────────────────────
 
 from faster_whisper import WhisperModel

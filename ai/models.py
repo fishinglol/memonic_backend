@@ -5,6 +5,16 @@ import numpy as np
 import torch
 import torchaudio
 import torch.nn.functional as F
+
+# ── PyTorch < 2.4 compatibility patch ──────────────────────────
+# SpeechBrain expects torch.amp.custom_fwd which only exists in
+# PyTorch 2.4+.  Lightning AI ships 2.2, so we shim it here.
+if not hasattr(torch.amp, 'custom_fwd'):
+    torch.amp.custom_fwd = torch.cuda.amp.custom_fwd
+if not hasattr(torch.amp, 'custom_bwd'):
+    torch.amp.custom_bwd = torch.cuda.amp.custom_bwd
+# ────────────────────────────────────────────────────────────────
+
 from faster_whisper import WhisperModel
 from speechbrain.inference.speaker import SpeakerRecognition
 from speechbrain.inference.classifiers import EncoderClassifier

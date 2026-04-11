@@ -167,6 +167,9 @@ async def esp32_audio(request: Request):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print("❌ ERROR in esp32_audio:")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

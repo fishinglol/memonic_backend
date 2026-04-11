@@ -44,10 +44,16 @@ def save_memory(user_id: str, text: str, emotion: str, speaker_confidence: float
     global chroma_collection, session_buffer, last_audio_time, popup_store
     if chroma_collection is None:
         return
-    res = ollama.embed(model=EMBEDDING_MODEL, input=text)
+    # ollama 0.2+ uses embed(), 0.1.x uses embeddings() with different return shape
+    if hasattr(ollama, 'embed'):
+        res = ollama.embed(model=EMBEDDING_MODEL, input=text)
+        embedding = res["embeddings"][0]
+    else:
+        res = ollama.embeddings(model=EMBEDDING_MODEL, prompt=text)
+        embedding = res["embedding"]
     chroma_collection.add(
         ids=[str(uuid.uuid4())],
-        embeddings=[res["embeddings"][0]],
+        embeddings=[embedding],
         documents=[text],
         metadatas=[{
             "user_id": user_id,

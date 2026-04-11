@@ -6,22 +6,39 @@ import torch
 import torchaudio
 import torch.nn.functional as F
 
-# ── PyTorch < 2.4 compatibility patch ──────────────────────────
-# SpeechBrain calls torch.amp.custom_fwd(device_type=...) which
-# only exists in PyTorch 2.4+.  Lightning AI ships 2.2 where it
-# lives under torch.cuda.amp and doesn't accept device_type.
-# This wrapper bridges the two APIs.
+# ── SpeechBrain / PyTorch compatibility patch ────────────────────
+# SpeechBrain 0.5.x calls torch.amp.custom_fwd(device_type=...)
+# • PyTorch < 2.4  → torch.amp.custom_fwd doesn't exist at all
+# • PyTorch ≥ 2.4  → torch.amp.custom_fwd exists but REJECTS device_type
+# This wrapper bridges both directions.
+import inspect as _inspect
+
 if not hasattr(torch.amp, 'custom_fwd'):
+    # OLD PyTorch: custom_fwd lives under torch.cuda.amp
     _orig_custom_fwd = torch.cuda.amp.custom_fwd
     _orig_custom_bwd = torch.cuda.amp.custom_bwd
 
     def _compat_custom_fwd(fn=None, *, device_type=None, cast_inputs=None):
-        """Accept device_type (new API) but forward to cuda.amp (old API)."""
         return _orig_custom_fwd(fn, cast_inputs=cast_inputs)
 
     def _compat_custom_bwd(fn=None, *, device_type=None):
-        """Accept device_type (new API) but forward to cuda.amp (old API)."""
         return _orig_custom_bwd(fn)
+
+    torch.amp.custom_fwd = _compat_custom_fwd
+    torch.amp.custom_bwd = _compat_custom_bwd
+
+elif 'device_type' not in _inspect.signature(torch.amp.custom_fwd).parameters:
+    # NEW PyTorch 2.4+: custom_fwd exists but no longer accepts device_type
+    _orig_custom_fwd = torch.amp.custom_fwd
+    _orig_custom_bwd = torch.amp.custom_bwd
+
+    def _compat_custom_fwd(fn=None, *, device_type=None, cast_inputs=None):
+        if cast_inputs is not None:
+            return _orig_custom_fwd(fn, cast_inputs=cast_inputs)
+        return _orig_custom_fwd(fn) if fn else _orig_custom_fwd
+
+    def _compat_custom_bwd(fn=None, *, device_type=None):
+        return _orig_custom_bwd(fn) if fn else _orig_custom_bwd
 
     torch.amp.custom_fwd = _compat_custom_fwd
     torch.amp.custom_bwd = _compat_custom_bwd

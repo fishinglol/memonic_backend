@@ -24,26 +24,28 @@ echo "📥 Checking AI models..."
 ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 
-
-# 2. Python Dependencies
+# 5. Python Dependencies
 pip install speechbrain --upgrade --break-system-packages
 pip install transformers tokenizers==0.15.2 --break-system-packages
 pip install mem0ai --upgrade --break-system-packages
 
-# 3. Kill old session, create new one
+# 6. Kill old session, create fresh one
 tmux kill-session -t $SESSION 2>/dev/null
 tmux new-session -d -s $SESSION -n "services"
-sleep 0.5  # ← give tmux time to init
 
-# 4. Pane 0: AI Backend (Port 8001)
-tmux send-keys -t $SESSION:0.0 "cd ~/memonic_backend/ai && uvicorn api:app --host 0.0.0.0 --port 8001" C-m
-sleep 0.3  # ← let pane 0 settle
-
-# 5. Split and run Core Backend (Port 8000)
+# 7. Split FIRST, before sending any commands
 tmux split-window -h -t $SESSION:0
-sleep 0.3  # ← wait for new pane to exist
-tmux send-keys -t $SESSION:0.1 "cd ~/memonic_backend/core && uvicorn main:app --host 0.0.0.0 --port 8000" C-m
 
+# 8. Small sleep to let both panes stabilize
 sleep 1
-echo "✅ Setup complete! Entering tmux..."
+
+# 9. Send commands AFTER both panes exist
+# Pane 0.0 (left) → AI backend on 8001
+tmux send-keys -t $SESSION:0.0 "cd ~/ai && uvicorn api:app --host 0.0.0.0 --port 8001" C-m
+
+# Pane 0.1 (right) → Core backend on 8000
+tmux send-keys -t $SESSION:0.1 "cd ~/core && uvicorn main:app --host 0.0.0.0 --port 8000" C-m
+
+echo "✅ Setup complete! Attaching..."
+sleep 1
 tmux attach-session -t $SESSION

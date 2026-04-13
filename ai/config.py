@@ -4,7 +4,7 @@ import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Model names / paths
-WHISPER_MODEL_NAME = "base"
+WHISPER_MODEL_NAME = "small"
 SPEAKER_MODEL_PATH = "pretrained_models/spkrec-ecapa-voxceleb"
 EMOTION_MODEL_PATH = "pretrained_models/emotion-recognition-wav2vec2-IEMOCAP"
 

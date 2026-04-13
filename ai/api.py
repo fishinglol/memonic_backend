@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -250,6 +251,39 @@ async def esp32_audio(request: Request):
         print("❌ ERROR in esp32_audio:")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Debug Audio Playback ─────────────────────────────────
+@app.get("/api/debug-audio")
+async def list_debug_audio():
+    """List all saved debug audio files. Open any URL in your browser to hear it."""
+    import os, glob
+    debug_dir = "debug_audio"
+    if not os.path.exists(debug_dir):
+        return {"files": [], "message": "No debug audio yet. Send audio from ESP32 first."}
+
+    files = sorted(glob.glob(os.path.join(debug_dir, "*.wav")), reverse=True)
+    base_url = "https://8001-01kkh2et3bdjymj2fjq6jabg8k.cloudspaces.litng.ai"
+    result = []
+    for f in files:
+        filename = os.path.basename(f)
+        size_kb = os.path.getsize(f) / 1024
+        result.append({
+            "filename": filename,
+            "size_kb": round(size_kb, 1),
+            "play_url": f"{base_url}/api/debug-audio/{filename}",
+        })
+    return {"files": result, "message": f"Open any play_url in your browser to hear the audio."}
+
+
+@app.get("/api/debug-audio/{filename}")
+async def get_debug_audio(filename: str):
+    """Serve a debug audio WAV file — open in browser to play it."""
+    import os
+    file_path = os.path.join("debug_audio", filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    return FileResponse(file_path, media_type="audio/wav", filename=filename)
 
 
 @app.get("/api/check-popup/{user_id}")

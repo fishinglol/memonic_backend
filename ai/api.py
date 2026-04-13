@@ -143,32 +143,77 @@ async def esp32_audio(request: Request):
         # Mark bracelet as alive whenever it sends audio
         device_state["bracelet_last_seen"] = time.time()
 
+        t_start = time.time()
+        print("\n" + "=" * 60)
+        print("🎤 ESP32 AUDIO RECEIVED")
+        print("=" * 60)
+
         audio_bytes = await request.body()
         if len(audio_bytes) < 44:
             raise HTTPException(status_code=400, detail="Audio too short (need WAV with header)")
 
+        duration_est = (len(audio_bytes) - 44) / (16000 * 2)  # estimate from 16kHz 16-bit mono
+        print(f"📦 Size: {len(audio_bytes):,} bytes (~{duration_est:.1f}s audio)")
+
         signal, fs = models.load_audio_bytes(audio_bytes, "audio.wav")
         if signal.shape[0] > 1:
             signal = models.to_mono(signal)
+        print(f"✅ Audio loaded: {signal.shape}, sample rate: {fs}")
 
         # Speaker identification
+        t1 = time.time()
+        print("🔍 Running speaker identification...")
         test_embedding = models.encode_speaker(signal)
         identified_user, best_score = models.match_speaker(test_embedding)
+        print(f"   → Speaker: {identified_user} (confidence: {best_score:.4f}) [{time.time()-t1:.2f}s]")
 
         # Emotion detection
+        t2 = time.time()
+        print("😊 Running emotion detection...")
         detected_emotion = models.classify_emotion(signal)
+        print(f"   → Emotion: {detected_emotion} [{time.time()-t2:.2f}s]")
 
         # Transcription
+        t3 = time.time()
+        print("📝 Running transcription...")
         text = models.transcribe(signal)
         if not text:
             text = "[No speech detected]"
+        print(f"   → Text: {text} [{time.time()-t3:.2f}s]")
+
+        # ════════════════════════════════════════════
+        # TERMINAL POPUP — the main output
+        # ════════════════════════════════════════════
+        print()
+        print("┌" + "─" * 58 + "┐")
+        print(f"│  [{identified_user}[{best_score:.2f}]][{detected_emotion}]: {text[:48]}")
+        if len(text) > 48:
+            print(f"│  {text[48:]}")
+        print("└" + "─" * 58 + "┘")
 
         summary = ""
         if text != "[No speech detected]" and identified_user != "Unknown":
             # Save to ChromaDB (feeds fetchHomeData, fetchEvents, fetchMood)
+            t4 = time.time()
+            print("💾 Saving to ChromaDB...")
             memory.save_memory(identified_user, text, detected_emotion, best_score)
+            print(f"   → Saved [{time.time()-t4:.2f}s]")
+
             # Generate immediate LLM summary and store popup (feeds popupInterval in mobile app)
+            t5 = time.time()
+            print("🤖 Generating LLM summary...")
             summary = await memory.summarize_and_popup(identified_user, text, detected_emotion)
+            print(f"   → Summary: {summary} [{time.time()-t5:.2f}s]")
+            print(f"📱 Popup stored for '{identified_user}' → mobile app will pick it up")
+        else:
+            if identified_user == "Unknown":
+                print("⚠️  Unknown speaker — memory NOT saved")
+            if text == "[No speech detected]":
+                print("⚠️  No speech detected — memory NOT saved")
+
+        total_time = time.time() - t_start
+        print(f"\n⏱️  Total processing time: {total_time:.2f}s")
+        print("=" * 60 + "\n")
 
         return {
             "identified_user": identified_user,

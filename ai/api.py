@@ -155,10 +155,30 @@ async def esp32_audio(request: Request):
         duration_est = (len(audio_bytes) - 44) / (16000 * 2)  # estimate from 16kHz 16-bit mono
         print(f"📦 Size: {len(audio_bytes):,} bytes (~{duration_est:.1f}s audio)")
 
+        # ── Save raw audio for debugging — listen to it! ──
+        import os
+        from datetime import datetime
+        debug_dir = "debug_audio"
+        os.makedirs(debug_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_path = os.path.join(debug_dir, f"esp32_{timestamp}.wav")
+        with open(debug_path, "wb") as f:
+            f.write(audio_bytes)
+        print(f"💾 Debug audio saved: {debug_path}")
+
         signal, fs = models.load_audio_bytes(audio_bytes, "audio.wav")
         if signal.shape[0] > 1:
             signal = models.to_mono(signal)
         print(f"✅ Audio loaded: {signal.shape}, sample rate: {fs}")
+
+        # ── Audio signal stats — check if it's silence or real audio ──
+        import torch
+        audio_np = signal.squeeze()
+        rms = torch.sqrt(torch.mean(audio_np ** 2)).item()
+        peak = torch.max(torch.abs(audio_np)).item()
+        print(f"📊 Signal stats — RMS: {rms:.6f}, Peak: {peak:.6f}, Samples: {audio_np.shape[0]}")
+        if rms < 0.001:
+            print("⚠️  WARNING: Audio is nearly SILENT — mic may not be working!")
 
         # Speaker identification
         t1 = time.time()

@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+import struct
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -133,117 +134,133 @@ async def process_audio(req: ProcessAudioRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ══════════════════════════════════════════════════════════════
+# SHARED AUDIO PIPELINE — used by both HTTP and WebSocket
+# ══════════════════════════════════════════════════════════════
+def build_wav_header(data_size: int, sample_rate: int = 16000,
+                     bits_per_sample: int = 16, channels: int = 1) -> bytes:
+    """Build a 44-byte WAV header for raw PCM data."""
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    header = struct.pack('<4sI4s', b'RIFF', 36 + data_size, b'WAVE')
+    header += struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, channels,
+                          sample_rate, byte_rate, block_align, bits_per_sample)
+    header += struct.pack('<4sI', b'data', data_size)
+    return header
+
+
+async def process_audio_pipeline(wav_bytes: bytes, source: str = "HTTP") -> dict:
+    """
+    Shared AI pipeline for both HTTP POST and WebSocket audio.
+    Returns dict with: identified_user, speaker_confidence, emotion, transcription, summary
+    """
+    import os, torch
+    from datetime import datetime
+
+    device_state["bracelet_last_seen"] = time.time()
+
+    t_start = time.time()
+    print("\n" + "=" * 60)
+    print(f"🎤 ESP32 AUDIO RECEIVED ({source})")
+    print("=" * 60)
+
+    duration_est = (len(wav_bytes) - 44) / (16000 * 2)
+    print(f"📦 Size: {len(wav_bytes):,} bytes (~{duration_est:.1f}s audio)")
+
+    # Save debug audio
+    debug_dir = "debug_audio"
+    os.makedirs(debug_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    debug_path = os.path.join(debug_dir, f"esp32_{timestamp}.wav")
+    with open(debug_path, "wb") as f:
+        f.write(wav_bytes)
+    print(f"💾 Debug audio saved: {debug_path}")
+
+    signal, fs = models.load_audio_bytes(wav_bytes, "audio.wav")
+    if signal.shape[0] > 1:
+        signal = models.to_mono(signal)
+    print(f"✅ Audio loaded: {signal.shape}, sample rate: {fs}")
+
+    # Signal stats
+    audio_flat = signal.squeeze()
+    rms = torch.sqrt(torch.mean(audio_flat ** 2)).item()
+    peak = torch.max(torch.abs(audio_flat)).item()
+    print(f"📊 Signal stats — RMS: {rms:.6f}, Peak: {peak:.6f}, Samples: {audio_flat.shape[0]}")
+    if rms < 0.001:
+        print("⚠️  WARNING: Audio is nearly SILENT — mic may not be working!")
+
+    # Speaker identification
+    t1 = time.time()
+    print("🔍 Running speaker identification...")
+    test_embedding = models.encode_speaker(signal)
+    identified_user, best_score = models.match_speaker(test_embedding)
+    print(f"   → Speaker: {identified_user} (confidence: {best_score:.4f}) [{time.time()-t1:.2f}s]")
+
+    # Emotion detection
+    t2 = time.time()
+    print("😊 Running emotion detection...")
+    detected_emotion = models.classify_emotion(signal)
+    print(f"   → Emotion: {detected_emotion} [{time.time()-t2:.2f}s]")
+
+    # Transcription
+    t3 = time.time()
+    print("📝 Running transcription...")
+    text = models.transcribe(signal)
+    if not text:
+        text = "[No speech detected]"
+    print(f"   → Text: {text} [{time.time()-t3:.2f}s]")
+
+    # Terminal popup
+    print()
+    print("┌" + "─" * 58 + "┐")
+    print(f"│  [{identified_user}[{best_score:.2f}]][{detected_emotion}]: {text[:48]}")
+    if len(text) > 48:
+        print(f"│  {text[48:]}")
+    print("└" + "─" * 58 + "┘")
+
+    summary = ""
+    if text != "[No speech detected]" and identified_user != "Unknown":
+        t4 = time.time()
+        print("💾 Saving to ChromaDB...")
+        memory.save_memory(identified_user, text, detected_emotion, best_score)
+        print(f"   → Saved [{time.time()-t4:.2f}s]")
+
+        t5 = time.time()
+        print("🤖 Generating LLM summary...")
+        summary = await memory.summarize_and_popup(identified_user, text, detected_emotion)
+        print(f"   → Summary: {summary} [{time.time()-t5:.2f}s]")
+        print(f"📱 Popup stored for '{identified_user}' → mobile app will pick it up")
+    else:
+        if identified_user == "Unknown":
+            print("⚠️  Unknown speaker — memory NOT saved")
+        if text == "[No speech detected]":
+            print("⚠️  No speech detected — memory NOT saved")
+
+    total_time = time.time() - t_start
+    print(f"\n⏱️  Total processing time: {total_time:.2f}s")
+    print("=" * 60 + "\n")
+
+    return {
+        "identified_user": identified_user,
+        "speaker_confidence": round(best_score, 4),
+        "emotion": detected_emotion,
+        "transcription": text,
+        "summary": summary,
+    }
+
+
 @app.post("/api/esp32-audio")
 async def esp32_audio(request: Request):
     """
-    Receive raw WAV bytes from the ESP32 bracelet (no base64).
-    Run full pipeline: speaker ID → emotion → transcription → LLM summary → save to memory.
-    Triggers a popup for the mobile app via check-popup polling.
+    Receive raw WAV bytes from the ESP32 bracelet via HTTP POST (legacy).
+    For better reliability, use the WebSocket endpoint /ws/audio instead.
     """
     try:
-        # Mark bracelet as alive whenever it sends audio
-        device_state["bracelet_last_seen"] = time.time()
-
-        t_start = time.time()
-        print("\n" + "=" * 60)
-        print("🎤 ESP32 AUDIO RECEIVED")
-        print("=" * 60)
-
         audio_bytes = await request.body()
         if len(audio_bytes) < 44:
             raise HTTPException(status_code=400, detail="Audio too short (need WAV with header)")
-
-        duration_est = (len(audio_bytes) - 44) / (16000 * 2)  # estimate from 16kHz 16-bit mono
-        print(f"📦 Size: {len(audio_bytes):,} bytes (~{duration_est:.1f}s audio)")
-
-        # ── Save raw audio for debugging — listen to it! ──
-        import os
-        from datetime import datetime
-        debug_dir = "debug_audio"
-        os.makedirs(debug_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        debug_path = os.path.join(debug_dir, f"esp32_{timestamp}.wav")
-        with open(debug_path, "wb") as f:
-            f.write(audio_bytes)
-        print(f"💾 Debug audio saved: {debug_path}")
-
-        signal, fs = models.load_audio_bytes(audio_bytes, "audio.wav")
-        if signal.shape[0] > 1:
-            signal = models.to_mono(signal)
-        print(f"✅ Audio loaded: {signal.shape}, sample rate: {fs}")
-
-        # ── Audio signal stats — check if it's silence or real audio ──
-        import torch
-        audio_np = signal.squeeze()
-        rms = torch.sqrt(torch.mean(audio_np ** 2)).item()
-        peak = torch.max(torch.abs(audio_np)).item()
-        print(f"📊 Signal stats — RMS: {rms:.6f}, Peak: {peak:.6f}, Samples: {audio_np.shape[0]}")
-        if rms < 0.001:
-            print("⚠️  WARNING: Audio is nearly SILENT — mic may not be working!")
-
-        # Speaker identification
-        t1 = time.time()
-        print("🔍 Running speaker identification...")
-        test_embedding = models.encode_speaker(signal)
-        identified_user, best_score = models.match_speaker(test_embedding)
-        print(f"   → Speaker: {identified_user} (confidence: {best_score:.4f}) [{time.time()-t1:.2f}s]")
-
-        # Emotion detection
-        t2 = time.time()
-        print("😊 Running emotion detection...")
-        detected_emotion = models.classify_emotion(signal)
-        print(f"   → Emotion: {detected_emotion} [{time.time()-t2:.2f}s]")
-
-        # Transcription
-        t3 = time.time()
-        print("📝 Running transcription...")
-        text = models.transcribe(signal)
-        if not text:
-            text = "[No speech detected]"
-        print(f"   → Text: {text} [{time.time()-t3:.2f}s]")
-
-        # ════════════════════════════════════════════
-        # TERMINAL POPUP — the main output
-        # ════════════════════════════════════════════
-        print()
-        print("┌" + "─" * 58 + "┐")
-        print(f"│  [{identified_user}[{best_score:.2f}]][{detected_emotion}]: {text[:48]}")
-        if len(text) > 48:
-            print(f"│  {text[48:]}")
-        print("└" + "─" * 58 + "┘")
-
-        summary = ""
-        if text != "[No speech detected]" and identified_user != "Unknown":
-            # Save to ChromaDB (feeds fetchHomeData, fetchEvents, fetchMood)
-            t4 = time.time()
-            print("💾 Saving to ChromaDB...")
-            memory.save_memory(identified_user, text, detected_emotion, best_score)
-            print(f"   → Saved [{time.time()-t4:.2f}s]")
-
-            # Generate immediate LLM summary and store popup (feeds popupInterval in mobile app)
-            t5 = time.time()
-            print("🤖 Generating LLM summary...")
-            summary = await memory.summarize_and_popup(identified_user, text, detected_emotion)
-            print(f"   → Summary: {summary} [{time.time()-t5:.2f}s]")
-            print(f"📱 Popup stored for '{identified_user}' → mobile app will pick it up")
-        else:
-            if identified_user == "Unknown":
-                print("⚠️  Unknown speaker — memory NOT saved")
-            if text == "[No speech detected]":
-                print("⚠️  No speech detected — memory NOT saved")
-
-        total_time = time.time() - t_start
-        print(f"\n⏱️  Total processing time: {total_time:.2f}s")
-        print("=" * 60 + "\n")
-
-        return {
-            "identified_user": identified_user,
-            "speaker_confidence": round(best_score, 4),
-            "emotion": detected_emotion,
-            "transcription": text,
-            "summary": summary,
-        }
-
+        result = await process_audio_pipeline(audio_bytes, source="HTTP POST")
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -284,6 +301,81 @@ async def get_debug_audio(filename: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Audio file not found")
     return FileResponse(file_path, media_type="audio/wav", filename=filename)
+
+
+# ══════════════════════════════════════════════════════════════
+# WEBSOCKET ENDPOINT — ESP32 connects once, streams continuously
+#
+# Protocol:
+#   ESP32 → Server:  TEXT "START"     (begin recording)
+#   ESP32 → Server:  BINARY chunks    (raw 16-bit PCM at 16kHz)
+#   ESP32 → Server:  TEXT "STOP"      (end recording, triggers processing)
+#   Server → ESP32:  TEXT JSON        (result: speaker, emotion, text, summary)
+#
+# Benefits over HTTP POST:
+#   - Single persistent connection (no reconnect overhead)
+#   - Auto-reconnect if WiFi drops
+#   - Much more reliable for streaming audio
+# ══════════════════════════════════════════════════════════════
+@app.websocket("/ws/audio")
+async def websocket_audio(websocket: WebSocket):
+    await websocket.accept()
+    audio_buffer = bytearray()
+    is_recording = False
+    chunks_received = 0
+
+    print("\n🔌 WebSocket client connected")
+    print(f"   Free to stream audio. Waiting for START command...")
+
+    try:
+        while True:
+            msg = await websocket.receive()
+
+            if msg["type"] == "websocket.disconnect":
+                break
+
+            # ── Text commands: START / STOP ──
+            if "text" in msg:
+                command = msg["text"].strip().upper()
+
+                if command == "START":
+                    audio_buffer = bytearray()
+                    chunks_received = 0
+                    is_recording = True
+                    print("🎤 WebSocket: Recording STARTED")
+
+                elif command == "STOP":
+                    is_recording = False
+                    data_size = len(audio_buffer)
+                    duration = data_size / (16000 * 2)
+                    print(f"⏹️  WebSocket: Recording STOPPED — {data_size:,} bytes ({duration:.1f}s), {chunks_received} chunks")
+
+                    if data_size < 1600:  # less than 0.05s of audio
+                        await websocket.send_json({"error": "Audio too short"})
+                        continue
+
+                    # Build WAV from raw PCM buffer
+                    wav_header = build_wav_header(data_size, sample_rate=16000)
+                    wav_bytes = wav_header + bytes(audio_buffer)
+
+                    try:
+                        result = await process_audio_pipeline(wav_bytes, source="WebSocket")
+                        await websocket.send_json(result)
+                    except Exception as e:
+                        import traceback
+                        print(f"❌ Pipeline error: {e}")
+                        traceback.print_exc()
+                        await websocket.send_json({"error": str(e)})
+
+            # ── Binary data: raw PCM audio chunks ──
+            elif "bytes" in msg and is_recording:
+                audio_buffer.extend(msg["bytes"])
+                chunks_received += 1
+
+    except WebSocketDisconnect:
+        print("🔌 WebSocket client disconnected")
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
 
 
 @app.get("/api/check-popup/{user_id}")

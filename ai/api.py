@@ -270,6 +270,74 @@ async def esp32_audio(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/esp32-enroll/{user_id}")
+async def esp32_enroll(user_id: str, request: Request):
+    """
+    Enroll a voice profile using raw WAV bytes from the ESP32 bracelet.
+    The ESP32 records 7 seconds of speech and POSTs it here.
+    This creates a voice profile that matches the ESP32 mic quality.
+    """
+    try:
+        audio_bytes = await request.body()
+        if len(audio_bytes) < 44:
+            raise HTTPException(status_code=400, detail="Audio too short")
+
+        data_size = len(audio_bytes) - 44
+        duration = data_size / (16000 * 2)
+
+        print("\n" + "=" * 60)
+        print(f"🎙️  ESP32 VOICE ENROLLMENT: '{user_id}'")
+        print("=" * 60)
+        print(f"📦 Size: {len(audio_bytes):,} bytes (~{duration:.1f}s audio)")
+
+        if duration < 3.0:
+            raise HTTPException(status_code=400, detail=f"Too short ({duration:.1f}s). Need at least 5 seconds.")
+        if duration > 15.0:
+            raise HTTPException(status_code=400, detail=f"Too long ({duration:.1f}s). Max 12 seconds.")
+
+        # Save debug copy
+        import os
+        from datetime import datetime
+        os.makedirs("debug_audio", exist_ok=True)
+        debug_path = f"debug_audio/enroll_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        with open(debug_path, "wb") as f:
+            f.write(audio_bytes)
+        print(f"💾 Debug audio saved: {debug_path}")
+
+        signal, fs = models.load_audio_bytes(audio_bytes, "audio.wav")
+        if signal.shape[0] > 1:
+            signal = models.to_mono(signal)
+        print(f"✅ Audio loaded: {signal.shape}, sample rate: {fs}")
+
+        # Extract speaker embedding
+        import torch
+        embedding = models.encode_speaker(signal)
+        print(f"✅ Embedding extracted: shape {embedding.shape}")
+
+        # Save profile
+        models.save_profile(user_id, embedding)
+        print(f"✅ Voice profile saved for '{user_id}'")
+
+        # Verify: test against itself
+        _, self_score = models.match_speaker(embedding)
+        print(f"   Self-match score: {self_score:.4f}")
+        print("=" * 60 + "\n")
+
+        return {
+            "enrolled": user_id,
+            "duration": round(duration, 1),
+            "self_score": round(self_score, 4),
+            "message": f"Voice profile for '{user_id}' enrolled from ESP32 mic!"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"❌ Enrollment error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ── Debug Audio Playback ─────────────────────────────────
 @app.get("/api/debug-audio")
 async def list_debug_audio():

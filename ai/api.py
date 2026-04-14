@@ -399,6 +399,10 @@ async def websocket_audio(websocket: WebSocket):
     try:
         while True:
             msg = await websocket.receive()
+            
+            # Update heartbeat so UI shows "Connected"
+            import time
+            device_state["bracelet_last_seen"] = time.time()
 
             if msg["type"] == "websocket.disconnect":
                 break

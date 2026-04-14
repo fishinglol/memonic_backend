@@ -390,6 +390,7 @@ async def websocket_audio(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
     is_recording = False
+    enroll_user = None
     chunks_received = 0
 
     print("\n🔌 WebSocket client connected")
@@ -410,7 +411,15 @@ async def websocket_audio(websocket: WebSocket):
                     audio_buffer = bytearray()
                     chunks_received = 0
                     is_recording = True
+                    enroll_user = None
                     print("🎤 WebSocket: Recording STARTED")
+                    
+                elif command.startswith("ENROLL "):
+                    audio_buffer = bytearray()
+                    chunks_received = 0
+                    is_recording = True
+                    enroll_user = command[7:].strip()
+                    print(f"🎙️  WebSocket: ENROLLMENT STARTED for '{enroll_user}'")
 
                 elif command == "STOP":
                     is_recording = False
@@ -427,8 +436,29 @@ async def websocket_audio(websocket: WebSocket):
                     wav_bytes = wav_header + bytes(audio_buffer)
 
                     try:
-                        result = await process_audio_pipeline(wav_bytes, source="WebSocket")
-                        await websocket.send_json(result)
+                        if enroll_user:
+                            # ── ENROLLMENT LOGIC ──
+                            print(f"🎙️  Processing ENROLLMENT for '{enroll_user}'...")
+                            signal, fs = models.load_audio_bytes(wav_bytes, "audio.wav")
+                            if signal.shape[0] > 1:
+                                signal = models.to_mono(signal)
+                            import torch
+                            embedding = models.encode_speaker(signal)
+                            models.save_profile(enroll_user, embedding)
+                            _, self_score = models.match_speaker(embedding)
+                            print(f"✅ Voice profile saved for '{enroll_user}'")
+                            
+                            await websocket.send_json({
+                                "enrolled": enroll_user,
+                                "duration": round(duration, 1),
+                                "self_score": round(self_score, 4),
+                                "message": f"Successfully enrolled {enroll_user} via WebSocket!"
+                            })
+                            enroll_user = None
+                        else:
+                            # ── NORMAL PIPELINE ──
+                            result = await process_audio_pipeline(wav_bytes, source="WebSocket")
+                            await websocket.send_json(result)
                     except Exception as e:
                         import traceback
                         print(f"❌ Pipeline error: {e}")

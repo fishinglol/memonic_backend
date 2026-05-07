@@ -2,13 +2,23 @@ import os
 import glob
 import tempfile
 import numpy as np
+import time
+import torch
+import torchaudio
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, FastAPI, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 import logging
+from pydantic import BaseModel
+from typing import List
 
 from core.database import SessionLocal
 from core.models import Memory
+import ai.memory as memory
+import ai.models as models
+
+# --- State Management ---
+device_state = {"bracelet_last_seen": 0}
 
 logger = logging.getLogger(__name__)
 
@@ -16,28 +26,21 @@ router = APIRouter()
 app = FastAPI()
 app.include_router(router)
 
-# Try loading models, but allow failure so the API still mounts
+# Initialize AI models (Whisper, Speaker, Emotion)
+# This will use the logic in ai/models.py
 try:
-    from faster_whisper import WhisperModel
-    whisper_model = WhisperModel("base", device="cpu", compute_type="float32")
+    import asyncio
+    # Run initialization in the background or at startup
+    # For now, we'll call it synchronously to ensure they are ready
+    # Note: In a real production app, you might want to do this asynchronously
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        loop.create_task(models.init_models())
+    else:
+        asyncio.run(models.init_models())
+    models.load_all_profiles()
 except Exception as e:
-    logger.error(f"Failed to load whisper model: {e}")
-    whisper_model = None
-
-try:
-    from speechbrain.inference.speaker import EncoderClassifier
-    # Using the standard ecapa-tdnn model for embedding extraction
-    speaker_model = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmpdir")
-except Exception as e:
-    logger.error(f"Failed to load speaker model: {e}")
-    speaker_model = None
-
-try:
-    from transformers import pipeline
-    emotion_classifier = pipeline("audio-classification", model="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition")
-except Exception as e:
-    logger.error(f"Failed to load emotion model: {e}")
-    emotion_classifier = None
+    logger.error(f"Failed to initialize AI models: {e}")
 
 
 def get_db():
@@ -48,54 +51,40 @@ def get_db():
         db.close()
 
 def identify_speaker(audio_path: str) -> str:
-    if speaker_model is None:
-        return "unknown"
     try:
-        import torchaudio
-        import torch
         signal, fs = torchaudio.load(audio_path)
+        if signal.shape[0] > 1:
+            signal = models.to_mono(signal)
         
-        # Resample to 16kHz if needed (ECAPA-TDNN expects 16kHz)
+        # Resample to 16kHz if needed (models usually expect 16kHz)
         if fs != 16000:
-            resampler = torchaudio.transforms.Resample(fs, 16000)
+            import torchaudio.transforms as T
+            resampler = T.Resample(fs, 16000)
             signal = resampler(signal)
             
-        embeddings = speaker_model.encode_batch(signal)
-        emb_np = embeddings.squeeze().cpu().numpy()
-        
-        member_voice_dir = os.path.join(os.path.dirname(__file__), "member_voice")
-        if not os.path.exists(member_voice_dir):
-            return "unknown"
-            
-        best_match = "unknown"
-        best_score = -1.0
-        
-        for npy_file in glob.glob(os.path.join(member_voice_dir, "*_profile.npy")):
-            profile_emb = np.load(npy_file)
-            # Cosine similarity
-            score = np.dot(emb_np, profile_emb) / (np.linalg.norm(emb_np) * np.linalg.norm(profile_emb))
-            if score > best_score and score > 0.5: # 0.5 is an example threshold
-                best_score = score
-                best_match = os.path.basename(npy_file).replace("_profile.npy", "")
-                
+        embedding = models.encode_speaker(signal)
+        best_match, score = models.match_speaker(embedding)
         return best_match
     except Exception as e:
         logger.error(f"Speaker identification failed: {e}")
         return "unknown"
 
 def get_emotion(audio_path: str) -> str:
-    if emotion_classifier is None:
-        return "unknown"
     try:
-        result = emotion_classifier(audio_path)
-        if result and len(result) > 0:
-            return result[0]['label']
+        signal, fs = torchaudio.load(audio_path)
+        return models.classify_emotion(signal)
     except Exception as e:
         logger.error(f"Emotion detection failed: {e}")
     return "unknown"
 
+def transcribe_audio(audio_path: str) -> str:
+    try:
+        signal, fs = torchaudio.load(audio_path)
+        return models.transcribe(signal)
+    except Exception as e:
+        logger.error(f"Transcription failed: {e}")
+        return ""
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, FastAPI, WebSocket, WebSocketDisconnect
 
 @router.post("/audio")
 async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(None), db: Session = Depends(get_db)):
@@ -118,11 +107,9 @@ async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(No
 
         if enroll_user:
             try:
-                import ai.models as ai_models
-                import torchaudio
                 signal, fs = torchaudio.load(temp_file.name)
-                embedding = ai_models.encode_speaker(signal, fs)
-                ai_models.save_profile(enroll_user, embedding)
+                embedding = models.encode_speaker(signal)
+                models.save_profile(enroll_user, embedding)
                 return {
                     "status": "ok",
                     "text": f"SUCCESS: Enrolled {enroll_user}",
@@ -132,19 +119,13 @@ async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(No
                 logger.error(f"Enroll error: {e}")
                 raise HTTPException(status_code=500, detail={"status": "error", "message": str(e)})
         
-        # Step 2: Whisper -> transcript text
-        transcript = ""
-        try:
-            if whisper_model:
-                segments, info = whisper_model.transcribe(temp_file.name, beam_size=5)
-                transcript = " ".join([segment.text for segment in segments]).strip()
-        except Exception as e:
-            logger.error(f"Whisper failed: {e}")
+        # Step 2: Transcribe
+        transcript = transcribe_audio(temp_file.name)
 
-        # Step 3: ECAPA-TDNN -> return speaker name or "unknown"
+        # Step 3: Speaker ID
         speaker = identify_speaker(temp_file.name)
         
-        # Step 4: wav2vec2-based emotion detection -> emotion label
+        # Step 4: Emotion
         emotion = get_emotion(temp_file.name)
         
         # Step 5: Save to SQLite table "memories"
@@ -159,7 +140,14 @@ async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(No
         db.commit()
         db.refresh(new_memory)
         
-        # Step 6: Return JSON
+        # Step 6: Trigger Popup (summarization + push notification)
+        try:
+            user_id_for_popup = speaker if speaker != "unknown" else "user"
+            asyncio.create_task(memory.summarize_and_popup(user_id_for_popup, transcript, emotion))
+        except Exception as e:
+            logger.error(f"Popup trigger failed: {e}")
+
+        # Step 7: Return JSON
         return {
             "status": "ok",
             "transcript": transcript,
@@ -183,86 +171,80 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
     logger.info("WebSocket connected")
     try:
         while True:
-            msg = await websocket.receive_text()
-            if not msg.startswith("START") and not msg.startswith("ENROLL"):
-                continue
-                
-            is_enroll = msg.startswith("ENROLL")
-            enroll_user = msg.replace("ENROLL", "").strip() if is_enroll else None
+            msg = await websocket.receive()
             
-            audio_data = bytearray()
-            
-            while True:
-                message = await websocket.receive()
-                if "bytes" in message:
-                    audio_data.extend(message["bytes"])
-                elif "text" in message:
-                    if message["text"] == "STOP":
-                        break
-            
-            if len(audio_data) < 1000:
-                await websocket.send_text("ERROR: Audio too short")
-                continue
-                
-            import wave
-            import tempfile
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-            try:
-                with wave.open(temp_file.name, "wb") as wav_file:
-                    wav_file.setnchannels(1)
-                    wav_file.setsampwidth(2) # 16-bit
-                    wav_file.setframerate(16000)
-                    wav_file.writeframes(audio_data)
-                    
-                if is_enroll and enroll_user:
-                    try:
-                        import ai.models as ai_models
-                        import torchaudio
-                        signal, fs = torchaudio.load(temp_file.name)
-                        embedding = ai_models.encode_speaker(signal, fs)
-                        ai_models.save_profile(enroll_user, embedding)
-                        await websocket.send_text(f"SUCCESS: Enrolled {enroll_user}")
-                    except Exception as e:
-                        logger.error(f"Enroll error: {e}")
-                        await websocket.send_text(f"ERROR: {e}")
-                else:
-                    transcript = ""
-                    try:
-                        if whisper_model:
-                            segments, info = whisper_model.transcribe(temp_file.name, beam_size=5)
-                            transcript = " ".join([segment.text for segment in segments]).strip()
-                    except Exception as e:
-                        logger.error(f"Whisper failed: {e}")
+            # Update heartbeat so UI shows "Connected"
+            device_state["bracelet_last_seen"] = time.time()
 
-                    speaker = identify_speaker(temp_file.name)
-                    emotion = get_emotion(temp_file.name)
+            if "text" in msg:
+                command = msg["text"].strip().upper()
+                if not command.startswith("START") and not command.startswith("ENROLL"):
+                    continue
+                
+                is_enroll = command.startswith("ENROLL")
+                enroll_user = command[7:].strip() if is_enroll else None
+                
+                audio_data = bytearray()
+                
+                while True:
+                    message = await websocket.receive()
+                    if "bytes" in message:
+                        audio_data.extend(message["bytes"])
+                    elif "text" in message:
+                        if message["text"].strip().upper() == "STOP":
+                            break
+                
+                if len(audio_data) < 1000:
+                    await websocket.send_text("ERROR: Audio too short")
+                    continue
                     
-                    timestamp = datetime.utcnow()
-                    new_memory = Memory(
-                        transcript=transcript,
-                        speaker=speaker,
-                        emotion=emotion,
-                        timestamp=timestamp
-                    )
-                    db.add(new_memory)
-                    db.commit()
-                    db.refresh(new_memory)
-                    
-                    # Store memory summary for popup
-                    try:
-                        import ai.memory as mem
-                        import asyncio
-                        # The popup requires user_id. For now, use speaker or default
-                        user_id_for_popup = speaker if speaker != "unknown" else "user"
-                        asyncio.create_task(mem.summarize_and_popup(user_id_for_popup, transcript, emotion))
-                    except Exception as e:
-                        logger.error(f"Popup error: {e}")
-                    
-                    await websocket.send_text(f"OK: {transcript} | Speaker: {speaker} | Emotion: {emotion}")
-                    
-            finally:
-                if os.path.exists(temp_file.name):
-                    os.remove(temp_file.name)
+                import wave
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                try:
+                    with wave.open(temp_file.name, "wb") as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2) # 16-bit
+                        wav_file.setframerate(16000)
+                        wav_file.writeframes(audio_data)
+                        
+                    if is_enroll and enroll_user:
+                        try:
+                            signal, fs = torchaudio.load(temp_file.name)
+                            embedding = models.encode_speaker(signal)
+                            models.save_profile(enroll_user, embedding)
+                            await websocket.send_text(f"SUCCESS: Enrolled {enroll_user}")
+                        except Exception as e:
+                            logger.error(f"Enroll error: {e}")
+                            await websocket.send_text(f"ERROR: {e}")
+                    else:
+                        # Normal Pipeline
+                        transcript = transcribe_audio(temp_file.name)
+                        speaker = identify_speaker(temp_file.name)
+                        emotion = get_emotion(temp_file.name)
+                        
+                        timestamp = datetime.utcnow()
+                        new_memory = Memory(
+                            transcript=transcript,
+                            speaker=speaker,
+                            emotion=emotion,
+                            timestamp=timestamp
+                        )
+                        db.add(new_memory)
+                        db.commit()
+                        db.refresh(new_memory)
+                        
+                        # Store memory summary for popup
+                        try:
+                            user_id_for_popup = speaker if speaker != "unknown" else "user"
+                            asyncio.create_task(memory.summarize_and_popup(user_id_for_popup, transcript, emotion))
+                        except Exception as e:
+                            logger.error(f"Popup error: {e}")
+                        
+                        await websocket.send_text(f"OK: {transcript} | Speaker: {speaker} | Emotion: {emotion}")
+                        
+                finally:
+                    if os.path.exists(temp_file.name):
+                        os.remove(temp_file.name)
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
@@ -294,3 +276,106 @@ def get_memories(limit: int = 20, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Error fetching memories: {e}")
         raise HTTPException(status_code=500, detail={"status": "error", "message": str(e)})
+
+
+# ── DASHBOARD & AI ENDPOINTS ──────────────────────────────────────
+
+@router.get("/api/check-popup/{user_id}")
+async def check_popup(user_id: str):
+    return memory.check_popup(user_id)
+
+
+@router.post("/api/trigger-summary/{user_id}")
+async def trigger_summary(user_id: str):
+    return await memory.trigger_summary(user_id)
+
+
+@router.get("/api/get-home-data/{user_id}")
+async def get_home_data(user_id: str):
+    return await memory.get_home_data(user_id)
+
+
+@router.get("/api/get-events/{user_id}")
+async def get_events(user_id: str):
+    return await memory.get_events(user_id)
+
+
+@router.get("/api/get-mood/{user_id}")
+async def get_mood(user_id: str):
+    return await memory.get_mood(user_id)
+
+
+@router.get("/api/members")
+async def list_members():
+    """List all users who have enrolled their voice."""
+    member_voice_dir = "member_voice"
+    if not os.path.exists(member_voice_dir):
+        return []
+    
+    npy_files = glob.glob(os.path.join(member_voice_dir, "*_profile.npy"))
+    members = []
+    for file_path in npy_files:
+        filename = os.path.basename(file_path)
+        user_id = filename.replace("_profile.npy", "")
+        members.append(user_id)
+    
+    return sorted(members)
+
+
+@router.delete("/api/voice-profile/{user_id}")
+async def delete_voice_profile(user_id: str):
+    member_voice_dir = "member_voice"
+    file_path = os.path.join(member_voice_dir, f"{user_id}_profile.npy")
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return {"status": "success", "message": f"Voice profile for '{user_id}' deleted."}
+    else:
+        raise HTTPException(status_code=404, detail="Voice profile not found")
+
+
+# ── DEVICE STATUS & HEARTBEAT ─────────────────────────────────────
+
+class DeviceStatusUpdate(BaseModel):
+    bracelet: str = "Connected"
+    dock: str = "Connected"
+
+@router.post("/update")
+async def update_device(data: DeviceStatusUpdate):
+    """ESP32 calls this to push bracelet & dock status."""
+    device_state["bracelet_last_seen"] = time.time()
+    return {"status": "ok"}
+
+@router.get("/device-status")
+async def get_device_status():
+    """App calls this to read latest ESP32 values."""
+    is_alive = (time.time() - device_state["bracelet_last_seen"]) < 60
+    return {
+        "bracelet": "Connected" if is_alive else "Disconnected",
+        "dock": "Connected"
+    }
+
+
+# ── SEEDING HELPERS ───────────────────────────────────────────────
+
+class SeedMemoryRequest(BaseModel):
+    user_id: str = "fish"
+    entries: List[str] = [
+        "I have a meeting with my professor tomorrow at 3 PM about the final project.",
+        "I need to pick up groceries after class. We're out of milk and eggs.",
+        "I'm feeling pretty stressed about the upcoming exam on Friday.",
+        "My friend invited me to play basketball at the gym this Saturday at 10 AM.",
+        "I should call mom tonight. It's been a while since we talked.",
+    ]
+    emotions: List[str] = ["Neutral", "Happy", "Angry", "Happy", "Sad"]
+
+@router.post("/api/test-seed-memory")
+async def test_seed_memory(req: SeedMemoryRequest):
+    saved = 0
+    for i, text in enumerate(req.entries):
+        emotion = req.emotions[i] if i < len(req.emotions) else "Neutral"
+        try:
+            memory.save_memory(req.user_id, text, emotion, 0.95)
+            saved += 1
+        except Exception as e:
+            logger.error(f"seed error: {e}")
+    return {"status": "ok", "saved": saved, "user_id": req.user_id}

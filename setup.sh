@@ -1,7 +1,7 @@
 #!/bin/bash
 SESSION="memonic"
 
-echo "🚀 Updating and Setting up Memonic on Lightning AI..."
+echo "🚀 Updating and Setting up Memonic Backend..."
 
 # 1. Update code
 git pull
@@ -19,33 +19,32 @@ if ! pgrep -x "ollama" > /dev/null; then
     sleep 5
 fi
 
-# 4. Pull models (only if needed)
+# 4. Pull models
 echo "📥 Checking AI models..."
 ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 
 # 5. Python Dependencies
-pip install speechbrain --upgrade --break-system-packages
-pip install transformers tokenizers==0.15.2 --break-system-packages
-pip install mem0ai --upgrade --break-system-packages
+# Use the local 'env' folder if it exists
+if [ -d "env" ]; then
+    echo "🐍 Installing dependencies into virtual environment..."
+    ./env/bin/pip install -r requirements.txt
+    ./env/bin/pip install faster-whisper --upgrade
+else
+    echo "⚠️ Virtual environment 'env' not found. Installing to system..."
+    pip install -r requirements.txt --break-system-packages
+fi
 
 # 6. Kill old session, create fresh one
 tmux kill-session -t $SESSION 2>/dev/null
-tmux new-session -d -s $SESSION -n "services"
+tmux new-session -d -s $SESSION -n "backend"
 
-# 7. Split FIRST, before sending any commands
-tmux split-window -h -t $SESSION:0
+# 7. Start Unified Backend
+# We run the unified backend from the root so imports work correctly.
+# Both Chat and the new Audio Processing API are now served together.
+echo "🚀 Starting unified backend on port 8000..."
+tmux send-keys -t $SESSION:0 "export PYTHONPATH=$PYTHONPATH:. && ./env/bin/uvicorn core.main:app --host 0.0.0.0 --port 8000 --reload" C-m
 
-# 8. Small sleep to let both panes stabilize
-sleep 1
-
-# 9. Send commands AFTER both panes exist
-# Pane 0.0 (left) → AI backend on 8001
-tmux send-keys -t $SESSION:0.0 "cd ~/ai && uvicorn api:app --host 0.0.0.0 --port 8001" C-m
-
-# Pane 0.1 (right) → Core backend on 8000
-tmux send-keys -t $SESSION:0.1 "cd ~/core && uvicorn main:app --host 0.0.0.0 --port 8000" C-m
-
-echo "✅ Setup complete! Attaching..."
+echo "✅ Setup complete! Backend is now serving /api/chat and /audio."
 sleep 1
 tmux attach-session -t $SESSION

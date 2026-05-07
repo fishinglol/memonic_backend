@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func as sql_func
 from pydantic import BaseModel
 from typing import Optional, List
-import models
-from database import SessionLocal, engine, Base
+from core import models
+from core.database import SessionLocal, engine, Base
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import uuid

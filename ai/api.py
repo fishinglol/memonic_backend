@@ -3,7 +3,7 @@ import glob
 import tempfile
 import numpy as np
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, FastAPI
 from sqlalchemy.orm import Session
 import logging
 
@@ -13,6 +13,8 @@ from core.models import Memory
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+app = FastAPI()
+app.include_router(router)
 
 # Try loading models, but allow failure so the API still mounts
 try:

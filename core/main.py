@@ -281,3 +281,37 @@ def get_session_messages(session_id: str, db: Session = Depends(get_db)):
 def get_history(db: Session = Depends(get_db)):
     history = db.query(models.ChatMessage).all()
     return history
+
+
+# --- Dashboard / App Missing Endpoints ---
+
+@app.get("/api/get-mood/{user_id}")
+def get_mood(user_id: str):
+    # Placeholder response
+    return {"user_id": user_id, "mood": "happy", "confidence": 0.85, "summary": "User seems to be in a good mood."}
+
+@app.get("/api/get-home-data/{user_id}")
+def get_home_data(user_id: str, db: Session = Depends(get_db)):
+    # Count memories or return dummy data
+    memory_count = db.query(models.Memory).count() if hasattr(models, 'Memory') else 0
+    return {
+        "user_id": user_id,
+        "memories_count": memory_count,
+        "recent_activity": "Chatting with AI",
+        "battery": 85
+    }
+
+@app.get("/api/get-events/{user_id}")
+def get_events(user_id: str):
+    # Placeholder response
+    return {"user_id": user_id, "events": []}
+
+@app.get("/device-status")
+def get_device_status():
+    # Placeholder response for bracelet status
+    return {"status": "online", "battery": 85, "last_sync": "Just now"}
+
+@app.get("/api/check-popup/{user_id}")
+def check_popup(user_id: str):
+    # Placeholder response, no new popup to show
+    return {"has_popup": False, "popup_data": None}

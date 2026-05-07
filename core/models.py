@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime
 from sqlalchemy.sql import func
 from database import Base
+from datetime import datetime
 
 
 class User(Base):
@@ -18,3 +19,11 @@ class ChatMessage(Base):
     role = Column(String)                    # Will be either 'user' or 'ai'
     content = Column(Text)                   # The actual message text
     timestamp = Column(DateTime(timezone=True), server_default=func.now()) # Auto-records the time
+
+class Memory(Base):
+    __tablename__ = "memories"
+    id = Column(Integer, primary_key=True)
+    transcript = Column(String)
+    speaker = Column(String)
+    emotion = Column(String)
+    timestamp = Column(DateTime, default=datetime.utcnow)

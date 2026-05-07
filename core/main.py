@@ -8,11 +8,17 @@ from database import SessionLocal, engine, Base
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import uuid
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ai.api import router as audio_router
 
 # สร้าง Table ในฐานข้อมูล (memonic.db)
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+app.include_router(audio_router)
 
 app.add_middleware(
     CORSMiddleware,

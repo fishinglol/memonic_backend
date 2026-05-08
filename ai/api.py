@@ -88,6 +88,8 @@ def transcribe_audio(audio_path: str) -> str:
 
 @router.post("/audio")
 async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(None), db: Session = Depends(get_db)):
+    # Update heartbeat
+    device_state["bracelet_last_seen"] = time.time()
     # Validate file size
     if not file:
         raise HTTPException(status_code=400, detail={"status": "error", "message": "No file provided"})
@@ -160,6 +162,36 @@ async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(No
     except Exception as e:
         logger.error(f"Audio processing error: {e}")
         raise HTTPException(status_code=500, detail={"status": "error", "message": str(e)})
+    finally:
+        if os.path.exists(temp_file.name):
+            os.remove(temp_file.name)
+
+
+@router.post("/api/enroll")
+async def enroll_member(req: dict):
+    """Enroll a new member via base64 audio (used by AddMemberSheet)."""
+    user_id = req.get("user_id")
+    audio_base64 = req.get("audio_base_64")
+    file_ext = req.get("file_ext", ".m4a")
+
+    if not user_id or not audio_base64:
+        raise HTTPException(status_code=400, detail="Missing user_id or audio_base_64")
+
+    import base64
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+    try:
+        audio_bytes = base64.b64decode(audio_base64)
+        with open(temp_file.name, "wb") as f:
+            f.write(audio_bytes)
+        
+        signal, fs = torchaudio.load(temp_file.name)
+        embedding = models.encode_speaker(signal)
+        models.save_profile(user_id, embedding)
+        
+        return {"status": "ok", "message": f"SUCCESS: Enrolled {user_id}"}
+    except Exception as e:
+        logger.error(f"Enroll error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_file.name):
             os.remove(temp_file.name)

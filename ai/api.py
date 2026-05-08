@@ -338,6 +338,7 @@ async def get_mood(user_id: str):
 
 
 @router.get("/api/members")
+@router.get("/api/members_voice")
 async def list_members():
     """List all users who have enrolled their voice."""
     member_voice_dir = "member_voice"

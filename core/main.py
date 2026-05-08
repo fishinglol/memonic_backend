@@ -27,6 +27,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from ai.models import init_models, load_all_profiles
+@app.on_event("startup")
+async def startup_event():
+    # Load AI models and previously enrolled voice profiles
+    await init_models()
+    load_all_profiles()
+    print("🚀 AI Models and Voice Profiles loaded successfully")
+
 # --- Ollama Configuration ---
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "llama3.2:3b"

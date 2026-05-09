@@ -162,7 +162,7 @@ def match_speaker(test_embedding: torch.Tensor):
             best_score = score
             best_match = known_user
 
-    identified_user = best_match if best_score > 0.75 else "Unknown"
+    identified_user = best_match if best_score > 0.65 else "Unknown"
     return identified_user, best_score
 
 

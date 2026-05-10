@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 app = FastAPI()
-app.include_router(router)
+# NOTE: app.include_router(router) is called at the END of this file,
+# AFTER all @router.* decorators have registered their routes.
 
 # Initialize AI models (Whisper, Speaker, Emotion)
 # This will use the logic in ai/models.py
@@ -536,3 +537,7 @@ async def test_seed_memory(req: SeedMemoryRequest):
         except Exception as e:
             logger.error(f"seed error: {e}")
     return {"status": "ok", "saved": saved, "user_id": req.user_id}
+
+
+# ── Mount router AFTER all routes are registered ─────────────────
+app.include_router(router)

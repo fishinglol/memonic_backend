@@ -244,6 +244,11 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
             bracelet_state["last_seen"] = now
             device_state["bracelet_last_seen"] = now
 
+            # Client disconnected cleanly — break instead of calling receive() again
+            if msg.get("type") == "websocket.disconnect":
+                logger.info("Bracelet sent disconnect frame")
+                break
+
             if "bytes" in msg:
                 if bracelet_state["job"]["state"] == "recording":
                     audio_data.extend(msg["bytes"])
@@ -372,8 +377,13 @@ async def bracelet_enroll(req: EnrollRequest):
 
 
 @router.post("/api/bracelet/record")
-async def bracelet_record():
-    """UI manually triggers a normal memory recording."""
+async def bracelet_record(seconds: int = 5):
+    """
+    UI manually triggers a normal memory recording.
+    `seconds` is the recording duration (clamped 1..30).
+    Sent to bracelet as 'START <n>'.
+    """
+    seconds = max(1, min(int(seconds), 30))
     ws = bracelet_state["ws"]
     if ws is None:
         raise HTTPException(status_code=503, detail="Bracelet not connected")
@@ -387,12 +397,12 @@ async def bracelet_record():
         "started_at": time.time(),
     }
     try:
-        await ws.send_text("START")
+        await ws.send_text(f"START {seconds}")
     except Exception as e:
         bracelet_state["job"]["state"] = "error"
         bracelet_state["job"]["result"] = f"ERROR: {e}"
         raise HTTPException(status_code=502, detail=str(e))
-    return {"ok": True}
+    return {"ok": True, "seconds": seconds}
 
 
 @router.get("/api/bracelet/status")

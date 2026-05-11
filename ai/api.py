@@ -355,7 +355,11 @@ class EnrollRequest(BaseModel):
 
 @router.post("/api/bracelet/enroll")
 async def bracelet_enroll(req: EnrollRequest):
-    """UI triggers enrollment. Server pushes 'ENROLL <name>' to bracelet over WSS."""
+    """
+    Trigger one enrollment recording. Call MULTIPLE TIMES with the same name
+    to get a stronger averaged voice profile (centroid embedding).
+    Recommended: call 3 times for best accuracy.
+    """
     name = (req.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name required")
@@ -378,7 +382,23 @@ async def bracelet_enroll(req: EnrollRequest):
         bracelet_state["job"]["state"] = "error"
         bracelet_state["job"]["result"] = f"ERROR: {e}"
         raise HTTPException(status_code=502, detail=str(e))
-    return {"ok": True, "name": name}
+    existing_samples = models.profile_sample_count(name)
+    return {
+        "ok": True,
+        "name": name,
+        "samples_so_far": existing_samples,
+        "hint": f"Will become sample #{existing_samples + 1} when recording finishes",
+    }
+
+
+@router.post("/api/bracelet/enroll-reset")
+async def bracelet_enroll_reset(req: EnrollRequest):
+    """Clear an existing enrollment so the next /enroll starts a fresh average."""
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    models.reset_profile(name)
+    return {"ok": True, "name": name, "message": "Profile cleared"}
 
 
 @router.post("/api/bracelet/record")

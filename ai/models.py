@@ -122,23 +122,128 @@ def to_mono(signal: torch.Tensor) -> torch.Tensor:
     return torch.mean(signal, dim=0, keepdim=True)
 
 
-def encode_speaker(signal: torch.Tensor) -> torch.Tensor:
+def preprocess_audio(signal: torch.Tensor, fs: int = 16000) -> torch.Tensor:
+    """
+    Clean up raw audio before encoding for speaker recognition.
+    Steps:
+      1. Mono mix
+      2. Resample to 16kHz (ECAPA expects this)
+      3. High-pass filter @ 80Hz — removes DC bias, hum, low rumble
+      4. Trim leading/trailing silence (energy-based VAD)
+      5. RMS normalize to consistent loudness
+    """
+    # 1. Mono
+    if signal.dim() == 2 and signal.shape[0] > 1:
+        signal = signal.mean(dim=0, keepdim=True)
+    if signal.dim() == 1:
+        signal = signal.unsqueeze(0)
+
+    # 2. Resample if needed
+    if fs != 16000:
+        signal = torchaudio.transforms.Resample(fs, 16000)(signal)
+        fs = 16000
+
+    # 3. High-pass filter @ 80Hz
+    try:
+        signal = torchaudio.functional.highpass_biquad(signal, fs, cutoff_freq=80.0)
+    except Exception:
+        pass  # not fatal if filter fails
+
+    # 4. Trim silence — frame-based RMS, drop frames below -40dB of peak
+    try:
+        frame = int(0.02 * fs)  # 20ms frames
+        flat = signal.squeeze(0)
+        if flat.numel() > frame * 3:
+            n_frames = flat.numel() // frame
+            energies = flat[: n_frames * frame].reshape(n_frames, frame).pow(2).mean(dim=1).sqrt()
+            peak = float(energies.max().item())
+            if peak > 1e-6:
+                threshold = peak * 0.10  # -20dB below peak
+                voiced = (energies > threshold).nonzero(as_tuple=True)[0]
+                if voiced.numel() > 0:
+                    start = int(voiced[0].item()) * frame
+                    end = (int(voiced[-1].item()) + 1) * frame
+                    signal = signal[:, start:end]
+    except Exception:
+        pass
+
+    # 5. RMS normalize to target -20dBFS (rms ≈ 0.1)
+    rms = signal.pow(2).mean().sqrt()
+    if float(rms.item()) > 1e-6:
+        signal = signal * (0.1 / rms)
+        # Clip to prevent overflow (shouldn't happen after RMS norm but safe)
+        signal = signal.clamp(-1.0, 1.0)
+
+    return signal
+
+
+def encode_speaker(signal: torch.Tensor, preprocess: bool = True, fs: int = 16000) -> torch.Tensor:
+    """Encode audio → speaker embedding. Applies preprocessing by default."""
     if _speaker is None:
         raise RuntimeError("Speaker model not loaded")
+    if preprocess:
+        signal = preprocess_audio(signal, fs)
     emb = _speaker.encode_batch(signal).squeeze()
     return emb
 
 
 def save_profile(user_id: str, embedding: torch.Tensor):
-    # Save .npy files to member_voice folder
+    """
+    Save a speaker profile.
+    If user_id already exists, the new embedding is averaged with the old one
+    (multi-sample centroid). This makes enrollment more robust — call this
+    function multiple times with different samples of the same voice.
+    """
     member_voice_dir = "member_voice"
     if not os.path.exists(member_voice_dir):
         os.makedirs(member_voice_dir, exist_ok=True)
-    
-    emb_np = embedding.detach().cpu().numpy()
-    file_path = os.path.join(member_voice_dir, f"{user_id}_profile.npy")
-    np.save(file_path, emb_np)
-    profiles_cache[user_id] = embedding
+
+    new_emb = embedding.detach().cpu()
+    # L2-normalize before averaging so each sample contributes equally
+    new_emb = new_emb / (new_emb.norm() + 1e-9)
+
+    # Counter tracks how many samples have been averaged
+    count_path = os.path.join(member_voice_dir, f"{user_id}_count.txt")
+    file_path  = os.path.join(member_voice_dir, f"{user_id}_profile.npy")
+
+    if os.path.exists(file_path) and os.path.exists(count_path):
+        try:
+            n = int(open(count_path).read().strip())
+            old = torch.from_numpy(np.load(file_path))
+            # Running mean: new_centroid = (old * n + new) / (n + 1)
+            centroid = (old * n + new_emb) / (n + 1)
+            centroid = centroid / (centroid.norm() + 1e-9)
+            n += 1
+        except Exception:
+            centroid = new_emb
+            n = 1
+    else:
+        centroid = new_emb
+        n = 1
+
+    np.save(file_path, centroid.numpy())
+    with open(count_path, "w") as f:
+        f.write(str(n))
+    profiles_cache[user_id] = centroid
+
+
+def reset_profile(user_id: str):
+    """Delete an enrollment so the next save_profile starts fresh."""
+    member_voice_dir = "member_voice"
+    for suffix in ("_profile.npy", "_count.txt"):
+        p = os.path.join(member_voice_dir, f"{user_id}{suffix}")
+        if os.path.exists(p):
+            os.remove(p)
+    profiles_cache.pop(user_id, None)
+
+
+def profile_sample_count(user_id: str) -> int:
+    """How many samples have been averaged into this user's profile."""
+    p = os.path.join("member_voice", f"{user_id}_count.txt")
+    try:
+        return int(open(p).read().strip())
+    except Exception:
+        return 0
 
 
 def match_speaker(test_embedding: torch.Tensor):

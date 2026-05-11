@@ -458,9 +458,9 @@ async def voice_debug():
         profiles = []
     return {
         "enrolled_users": profiles,
-        "current_threshold": 0.45,
+        "current_threshold": 0.40,
         "last_match": bracelet_state.get("last_match", None),
-        "hint": "score > 0.45 → identified. Lower threshold = more permissive.",
+        "hint": "score > 0.40 → identified. Lower threshold = more permissive.",
     }
 
 
@@ -557,13 +557,9 @@ async def list_members():
 
 @router.delete("/api/voice-profile/{user_id}")
 async def delete_voice_profile(user_id: str):
-    member_voice_dir = "member_voice"
-    file_path = os.path.join(member_voice_dir, f"{user_id}_profile.npy")
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        return {"status": "success", "message": f"Voice profile for '{user_id}' deleted."}
-    else:
-        raise HTTPException(status_code=404, detail="Voice profile not found")
+    # Delete BOTH file + RAM cache + sample counter (was leaving cache stale)
+    models.reset_profile(user_id)
+    return {"status": "success", "message": f"Voice profile for '{user_id}' deleted."}
 
 
 # ── DEVICE STATUS & HEARTBEAT ─────────────────────────────────────

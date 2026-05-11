@@ -79,15 +79,20 @@ def identify_speaker(audio_path: str) -> str:
         signal, fs = torchaudio.load(audio_path)
         if signal.shape[0] > 1:
             signal = models.to_mono(signal)
-        
-        # Resample to 16kHz if needed (models usually expect 16kHz)
         if fs != 16000:
             import torchaudio.transforms as T
             resampler = T.Resample(fs, 16000)
             signal = resampler(signal)
-            
+
         embedding = models.encode_speaker(signal)
         best_match, score = models.match_speaker(embedding)
+        # Log the actual score so we can tune the threshold
+        logger.info(f"🎯 Speaker match: {best_match} | score={score:.3f}")
+        # Stash for /api/voice-debug
+        try:
+            bracelet_state["last_match"] = {"user": best_match, "score": float(score)}
+        except Exception:
+            pass
         return best_match
     except Exception as e:
         logger.error(f"Speaker identification failed: {e}")
@@ -421,6 +426,46 @@ async def bracelet_reset():
     """UI clears the job state (e.g. after reading the result)."""
     _reset_job()
     return {"ok": True}
+
+
+@router.get("/api/voice-debug")
+async def voice_debug():
+    """Returns last match details + all enrolled profiles. Helps tune threshold."""
+    try:
+        from torch.nn import functional as F
+        profiles = list(models.profiles_cache.keys())
+    except Exception:
+        profiles = []
+    return {
+        "enrolled_users": profiles,
+        "current_threshold": 0.45,
+        "last_match": bracelet_state.get("last_match", None),
+        "hint": "score > 0.45 → identified. Lower threshold = more permissive.",
+    }
+
+
+@router.post("/api/voice-test")
+async def voice_test():
+    """
+    Trigger a 5s recording AND return all per-profile cosine scores so you can
+    see how strong each match is. Useful for tuning enrollment quality.
+    """
+    ws = bracelet_state["ws"]
+    if ws is None:
+        raise HTTPException(status_code=503, detail="Bracelet not connected")
+    if bracelet_state["job"]["state"] in ("recording", "processing"):
+        raise HTTPException(status_code=409, detail="Bracelet busy")
+    bracelet_state["job"] = {
+        "state": "recording",
+        "mode": "VOICE_TEST",
+        "user": None,
+        "result": None,
+        "started_at": time.time(),
+    }
+    # Use START so existing handler treats it as normal recording.
+    # The score logging in identify_speaker will populate last_match.
+    await ws.send_text("START 5")
+    return {"ok": True, "hint": "wait 6-7s, then GET /api/voice-debug"}
 
 
 @router.get("/api/memories")

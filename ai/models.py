@@ -162,7 +162,11 @@ def match_speaker(test_embedding: torch.Tensor):
             best_score = score
             best_match = known_user
 
-    identified_user = best_match if best_score > 0.65 else "Unknown"
+    # ECAPA-TDNN cosine similarity:
+    #   same speaker  → 0.45-0.85 (depends heavily on mic + noise + clip length)
+    #   different     → 0.0-0.35
+    # 0.45 is the canonical practical threshold for this model.
+    identified_user = best_match if best_score > 0.45 else "Unknown"
     return identified_user, best_score
 
 

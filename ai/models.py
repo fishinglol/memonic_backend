@@ -57,7 +57,7 @@ _emotion = None
 profiles_cache: dict = {}
 
 
-async def init_models(device: str = "cpu", whisper_name: str = "small",
+async def init_models(device: str = "cpu", whisper_name: str = "base",
                       speaker_path: str = "pretrained_models/spkrec-ecapa-voxceleb",
                       emotion_path: str = "pretrained_models/emotion-recognition-wav2vec2-IEMOCAP"):
     global _device

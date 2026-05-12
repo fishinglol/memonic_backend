@@ -3,6 +3,8 @@ import glob
 import tempfile
 import numpy as np
 import time
+import asyncio
+import wave
 import torch
 import torchaudio
 from datetime import datetime
@@ -11,6 +13,62 @@ from sqlalchemy.orm import Session
 import logging
 from pydantic import BaseModel
 from typing import List
+
+# ── VAD — energy-based utterance splitter ────────────────────
+# Runs on server so ESP32 just streams forever (no RAM cost on device)
+class StreamVAD:
+    """
+    Accumulates raw int16 PCM @ 16kHz.
+    Every 0.5s: checks RMS energy.
+      voiced  → append to voiced_buf, reset silence counter
+      silence → if we had voice + 1.5s silence → emit utterance
+    """
+    CHUNK_SAMPLES    = 8000    # 0.5s window
+    BYTES_PER_CHUNK  = CHUNK_SAMPLES * 2
+    SILENCE_CHUNKS   = 3      # 1.5s of silence = utterance boundary
+    SILENCE_THRESH   = 400    # int16 RMS — tune if env is noisy
+    MIN_VOICED_BYTES = 32000  # must have at least 1s of voice
+
+    def __init__(self):
+        self.voiced_buf    = bytearray()
+        self.pending_buf   = bytearray()
+        self.silence_count = 0
+        self.has_voice     = False
+
+    def feed(self, audio_bytes: bytes):
+        """Returns utterance bytes when detected, else None."""
+        self.pending_buf.extend(audio_bytes)
+        result = None
+        while len(self.pending_buf) >= self.BYTES_PER_CHUNK:
+            chunk = self.pending_buf[:self.BYTES_PER_CHUNK]
+            self.pending_buf = self.pending_buf[self.BYTES_PER_CHUNK:]
+            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+            rms = float(np.sqrt(np.mean(samples ** 2)))
+            if rms > self.SILENCE_THRESH:
+                self.voiced_buf.extend(chunk)
+                self.silence_count = 0
+                self.has_voice = True
+            else:
+                if self.has_voice:
+                    self.voiced_buf.extend(chunk)  # include trailing silence
+                    self.silence_count += 1
+                    if (self.silence_count >= self.SILENCE_CHUNKS
+                            and len(self.voiced_buf) >= self.MIN_VOICED_BYTES):
+                        result = bytes(self.voiced_buf)
+                        self.voiced_buf    = bytearray()
+                        self.silence_count = 0
+                        self.has_voice     = False
+        return result
+
+    def flush(self):
+        """Force-emit whatever is left (called on stream end)."""
+        if len(self.voiced_buf) >= self.MIN_VOICED_BYTES:
+            out = bytes(self.voiced_buf)
+            self.voiced_buf    = bytearray()
+            self.silence_count = 0
+            self.has_voice     = False
+            return out
+        return None
 
 from core.database import SessionLocal
 from core.models import Memory
@@ -226,13 +284,63 @@ async def enroll_member(req: dict):
             os.remove(temp_file.name)
 
 
+async def _process_utterance(audio_bytes: bytes, db: Session):
+    """
+    Async pipeline for one VAD-detected utterance.
+    Runs in background so the WS receive loop is never blocked.
+    VAD-gate: skip everything if whisper returns empty transcript.
+    """
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    try:
+        with wave.open(temp_file.name, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(audio_bytes)
+
+        transcript = transcribe_audio(temp_file.name)
+        if not transcript.strip():
+            logger.debug("VAD-gate: empty transcript, skipping")
+            return  # ← skip speaker/emotion/DB if nothing was said
+
+        speaker = identify_speaker(temp_file.name)
+        emotion = get_emotion(temp_file.name)
+
+        new_memory = Memory(
+            transcript=transcript,
+            speaker=speaker,
+            emotion=emotion,
+            timestamp=datetime.utcnow(),
+        )
+        db.add(new_memory)
+        db.commit()
+        db.refresh(new_memory)
+
+        logger.info(f"💾 Memory: [{speaker}|{emotion}] {transcript[:60]}")
+
+        try:
+            user_id_for_popup = speaker if speaker not in ("unknown", "Unknown") else "user"
+            asyncio.create_task(memory.summarize_and_popup(user_id_for_popup, transcript, emotion))
+        except Exception as e:
+            logger.error(f"Popup error: {e}")
+
+    except Exception as e:
+        logger.error(f"_process_utterance error: {e}")
+    finally:
+        if os.path.exists(temp_file.name):
+            os.remove(temp_file.name)
+
+
 @router.websocket("/ws/audio")
 async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
     """
     Server-driven bracelet channel.
-    Bracelet connects and waits. Server sends 'ENROLL <name>' or 'START' (triggered
-    by /api/bracelet/enroll or /api/bracelet/record). Bracelet then streams binary
-    PCM frames followed by a 'STOP' text frame.
+
+    Modes:
+      ENROLL <name>  — bracelet streams N sec → STOP → enroll
+      START <n>      — bracelet streams N sec → STOP → memory pipeline
+      STREAM         — bracelet streams forever; server VAD splits utterances
+                       and fires async pipeline per utterance (non-blocking)
     """
     await websocket.accept()
     bracelet_state["ws"] = websocket
@@ -240,7 +348,8 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
     device_state["bracelet_last_seen"] = time.time()
     logger.info("Bracelet WS connected")
 
-    audio_data = bytearray()
+    audio_data = bytearray()   # used for ENROLL / START
+    vad = StreamVAD()          # used for STREAM
 
     try:
         while True:
@@ -249,30 +358,37 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
             bracelet_state["last_seen"] = now
             device_state["bracelet_last_seen"] = now
 
-            # Client disconnected cleanly — break instead of calling receive() again
             if msg.get("type") == "websocket.disconnect":
                 logger.info("Bracelet sent disconnect frame")
                 break
 
+            # ── Binary audio frames ────────────────────────────────
             if "bytes" in msg:
-                if bracelet_state["job"]["state"] == "recording":
-                    audio_data.extend(msg["bytes"])
+                job = bracelet_state["job"]
+                if job["state"] == "recording":
+                    if job["mode"] == "STREAM":
+                        # VAD path — fire async task per utterance
+                        utterance = vad.feed(msg["bytes"])
+                        if utterance:
+                            asyncio.create_task(_process_utterance(utterance, db))
+                    else:
+                        # ENROLL / START — buffer everything
+                        audio_data.extend(msg["bytes"])
                 continue
 
             if "text" not in msg:
                 continue
 
             txt = msg["text"].strip()
-            up = txt.upper()
+            up  = txt.upper()
 
-            # Bracelet greets us — ignore
             if up == "HELLO":
                 continue
 
-            # End of stream — process
+            # ── STOP — end of ENROLL or START recording ────────────
             if up == "STOP" and bracelet_state["job"]["state"] == "recording":
                 job = bracelet_state["job"]
-                is_enroll = (job["mode"] == "ENROLL")
+                is_enroll  = (job["mode"] == "ENROLL")
                 enroll_user = job["user"]
 
                 if len(audio_data) < 1000:
@@ -283,14 +399,13 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
                     continue
 
                 job["state"] = "processing"
-                import wave
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
                 try:
-                    with wave.open(temp_file.name, "wb") as wav_file:
-                        wav_file.setnchannels(1)
-                        wav_file.setsampwidth(2)  # 16-bit
-                        wav_file.setframerate(16000)
-                        wav_file.writeframes(audio_data)
+                    with wave.open(temp_file.name, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(16000)
+                        wf.writeframes(audio_data)
 
                     if is_enroll and enroll_user:
                         try:
@@ -305,8 +420,8 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
                             job["state"] = "error"
                     else:
                         transcript = transcribe_audio(temp_file.name)
-                        speaker = identify_speaker(temp_file.name)
-                        emotion = get_emotion(temp_file.name)
+                        speaker    = identify_speaker(temp_file.name)
+                        emotion    = get_emotion(temp_file.name)
                         new_memory = Memory(
                             transcript=transcript,
                             speaker=speaker,
@@ -317,8 +432,8 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
                         db.commit()
                         db.refresh(new_memory)
                         try:
-                            user_id_for_popup = speaker if speaker != "unknown" else "user"
-                            asyncio.create_task(memory.summarize_and_popup(user_id_for_popup, transcript, emotion))
+                            uid = speaker if speaker not in ("unknown", "Unknown") else "user"
+                            asyncio.create_task(memory.summarize_and_popup(uid, transcript, emotion))
                         except Exception as e:
                             logger.error(f"Popup error: {e}")
                         result = f"OK: {transcript} | Speaker: {speaker} | Emotion: {emotion}"
@@ -334,6 +449,10 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
 
     except WebSocketDisconnect:
         logger.info("Bracelet WS disconnected")
+        # Flush any remaining VAD buffer on disconnect
+        leftover = vad.flush()
+        if leftover:
+            asyncio.create_task(_process_utterance(leftover, db))
     except Exception as e:
         logger.error(f"Bracelet WS error: {e}")
         try:
@@ -399,6 +518,51 @@ async def bracelet_enroll_reset(req: EnrollRequest):
         raise HTTPException(status_code=400, detail="name required")
     models.reset_profile(name)
     return {"ok": True, "name": name, "message": "Profile cleared"}
+
+
+@router.post("/api/bracelet/stream/start")
+async def bracelet_stream_start():
+    """
+    Start continuous stream mode.
+    Server does VAD — no need to specify duration.
+    Bracelet streams until /stream/stop is called.
+    """
+    ws = bracelet_state["ws"]
+    if ws is None:
+        raise HTTPException(status_code=503, detail="Bracelet not connected")
+    if bracelet_state["job"]["state"] in ("recording", "processing"):
+        raise HTTPException(status_code=409, detail="Bracelet busy")
+    bracelet_state["job"] = {
+        "state": "recording",
+        "mode": "STREAM",
+        "user": None,
+        "result": None,
+        "started_at": time.time(),
+    }
+    try:
+        await ws.send_text("STREAM")
+    except Exception as e:
+        bracelet_state["job"]["state"] = "error"
+        bracelet_state["job"]["result"] = f"ERROR: {e}"
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, "mode": "STREAM", "hint": "Server VAD active — call /stream/stop to end"}
+
+
+@router.post("/api/bracelet/stream/stop")
+async def bracelet_stream_stop():
+    """Stop the continuous stream. Server sends STOP_STREAM to bracelet."""
+    ws = bracelet_state["ws"]
+    job = bracelet_state["job"]
+    if ws is None:
+        raise HTTPException(status_code=503, detail="Bracelet not connected")
+    if job["mode"] != "STREAM":
+        raise HTTPException(status_code=409, detail="Not in STREAM mode")
+    try:
+        await ws.send_text("STOP_STREAM")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    _reset_job()
+    return {"ok": True}
 
 
 @router.post("/api/bracelet/record")

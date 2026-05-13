@@ -287,40 +287,51 @@ async def enroll_member(req: dict):
 async def _process_utterance(audio_bytes: bytes, db: Session):
     """
     Async pipeline for one VAD-detected utterance.
-    Runs in background so the WS receive loop is never blocked.
-    VAD-gate: skip everything if whisper returns empty transcript.
+    ALL heavy work runs in a thread pool via asyncio.to_thread so that
+    the WS receive loop is NEVER blocked. Without this, whisper/ECAPA
+    block the event loop → TCP buffer fills → ESP32 ring overflow.
     """
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     try:
-        with wave.open(temp_file.name, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(audio_bytes)
+        # 1. Write WAV (fast, IO-bound but small)
+        def _write_wav():
+            with wave.open(temp_file.name, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(audio_bytes)
+        await asyncio.to_thread(_write_wav)
 
-        transcript = transcribe_audio(temp_file.name)
+        # 2. Whisper transcribe — heavy, MUST be off-loop
+        transcript = await asyncio.to_thread(transcribe_audio, temp_file.name)
         if not transcript.strip():
             logger.debug("VAD-gate: empty transcript, skipping")
-            return  # ← skip speaker/emotion/DB if nothing was said
+            return
 
-        speaker = identify_speaker(temp_file.name)
-        emotion = get_emotion(temp_file.name)
-
-        new_memory = Memory(
-            transcript=transcript,
-            speaker=speaker,
-            emotion=emotion,
-            timestamp=datetime.utcnow(),
+        # 3. Speaker + emotion in parallel (both heavy)
+        speaker, emotion = await asyncio.gather(
+            asyncio.to_thread(identify_speaker, temp_file.name),
+            asyncio.to_thread(get_emotion,     temp_file.name),
         )
-        db.add(new_memory)
-        db.commit()
-        db.refresh(new_memory)
+
+        # 4. DB write (light, but still off-loop to be safe)
+        def _save():
+            new_memory = Memory(
+                transcript=transcript,
+                speaker=speaker,
+                emotion=emotion,
+                timestamp=datetime.utcnow(),
+            )
+            db.add(new_memory)
+            db.commit()
+            db.refresh(new_memory)
+        await asyncio.to_thread(_save)
 
         logger.info(f"💾 Memory: [{speaker}|{emotion}] {transcript[:60]}")
 
         try:
-            user_id_for_popup = speaker if speaker not in ("unknown", "Unknown") else "user"
-            asyncio.create_task(memory.summarize_and_popup(user_id_for_popup, transcript, emotion))
+            uid = speaker if speaker not in ("unknown", "Unknown") else "user"
+            asyncio.create_task(memory.summarize_and_popup(uid, transcript, emotion))
         except Exception as e:
             logger.error(f"Popup error: {e}")
 

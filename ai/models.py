@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torchaudio
 import torch.nn.functional as F
-
 # ── SpeechBrain / PyTorch compatibility patch ────────────────────
 # SpeechBrain 0.5.x calls torch.amp.custom_fwd(device_type=...)
 # • PyTorch < 2.4  → torch.amp.custom_fwd doesn't exist at all

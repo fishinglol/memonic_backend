@@ -30,7 +30,7 @@ async def relay():
     # UDP socket — receives audio from ESP32, sends commands back
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.bind((UDP_HOST, UDP_PORT))
-    udp.setblocking(False)
+    # blocking=True is fine — recvfrom runs in executor thread, not event loop
     log.info(f"UDP listening on :{UDP_PORT}")
 
     loop = asyncio.get_event_loop()

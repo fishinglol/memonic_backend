@@ -6,10 +6,19 @@ from typing import Optional, List
 from core import models
 from core.database import SessionLocal, engine, Base
 from fastapi.middleware.cors import CORSMiddleware
+from passlib.context import CryptContext
 import requests
 import uuid
 import sys
 import os
+
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(plain: str) -> str:
+    return pwd_ctx.hash(plain)
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_ctx.verify(plain, hashed)
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ai.api import router as audio_router
@@ -81,6 +90,9 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
 
+class DeleteAccountRequest(BaseModel):
+    password: str
+
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     message: str
@@ -105,7 +117,7 @@ def create_user(user: UserSchema, db: Session = Depends(get_db)):
     exists = db.query(models.User).filter(models.User.user_name == user.user_name).first()
     if exists:
         raise HTTPException(status_code=400, detail="User already exists")
-    new_user = models.User(user_name=user.user_name, password=user.password)
+    new_user = models.User(user_name=user.user_name, password=hash_password(user.password))
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -114,10 +126,9 @@ def create_user(user: UserSchema, db: Session = Depends(get_db)):
 @app.post("/login")
 def login(user: UserSchema, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(
-        models.User.user_name == user.user_name,
-        models.User.password == user.password
+        models.User.user_name == user.user_name
     ).first()
-    if not db_user:
+    if not db_user or not verify_password(user.password, db_user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password"
@@ -128,29 +139,25 @@ def login(user: UserSchema, db: Session = Depends(get_db)):
 @app.put("/api/change-password")
 def change_password(req: ChangePasswordRequest, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(
-        models.User.user_name == req.user_name,
-        models.User.password == req.current_password
+        models.User.user_name == req.user_name
     ).first()
-    if not db_user:
+    if not db_user or not verify_password(req.current_password, db_user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid current password or username"
         )
-    
-    db_user.password = req.new_password
+    db_user.password = hash_password(req.new_password)
     db.commit()
     return {"message": "Password updated successfully"}
 
 
 @app.delete("/api/account/{user_name}")
-def delete_account(user_name: str, db: Session = Depends(get_db)):
+def delete_account(user_name: str, req: DeleteAccountRequest, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.user_name == user_name).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    # Optional: Delete chat records for this user. 
-    # Current chat schema groups by session_id, we might not have user_id linked directly in ChatMessage yet,
-    # but we can just delete the user.
+    if not verify_password(req.password, db_user.password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password")
     db.delete(db_user)
     db.commit()
     return {"message": "Account deleted successfully"}

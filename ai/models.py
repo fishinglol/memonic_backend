@@ -82,7 +82,11 @@ async def init_models(device: str = "cpu", whisper_name: str = "base",
             savedir=emotion_path,
             run_opts={"device": device}
         )
-    except Exception:
+        print(f"✅ Emotion model loaded successfully")
+    except Exception as e:
+        print(f"❌ Emotion model FAILED to load: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         _emotion = None
 
 
@@ -278,13 +282,27 @@ def match_speaker(test_embedding: torch.Tensor):
 
 def classify_emotion(signal: torch.Tensor) -> str:
     if _emotion is None:
+        print("⚠️  emotion model is None (failed to load at startup)")
         return "Unknown"
     try:
-        emotion_signal = signal.squeeze(0).unsqueeze(0)
+        # Ensure mono + correct shape: (batch=1, samples)
+        if signal.dim() == 2:
+            if signal.shape[0] > 1:
+                signal = signal.mean(dim=0, keepdim=True)  # mono
+            emotion_signal = signal  # (1, samples)
+        else:
+            emotion_signal = signal.unsqueeze(0)  # (1, samples)
+
         out_prob, score, index, text_lab = _emotion.classify_batch(emotion_signal)
         emotion_map = {'ang': 'Angry', 'hap': 'Happy', 'sad': 'Sad', 'neu': 'Neutral'}
-        return emotion_map.get(text_lab[0], 'Unknown')
-    except Exception:
+        label = text_lab[0]
+        mapped = emotion_map.get(label, label)  # show raw label if not in map
+        print(f"🎭 Emotion: {label} → {mapped} (score={float(score):.2f})")
+        return mapped
+    except Exception as e:
+        print(f"⚠️  classify_emotion error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return "Unknown"
 
 

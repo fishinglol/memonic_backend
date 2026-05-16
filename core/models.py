@@ -27,3 +27,4 @@ class Memory(Base):
     speaker = Column(String)
     emotion = Column(String)
     timestamp = Column(DateTime, default=datetime.utcnow)
+    audio_path = Column(String, nullable=True)  # relative path to saved WAV in audio_archive/

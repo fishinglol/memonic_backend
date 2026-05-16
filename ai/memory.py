@@ -5,11 +5,16 @@ import re
 import uuid
 import chromadb
 import ollama
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 try:
     from .config import SILENCE_CHECK_INTERVAL, SILENCE_THRESHOLD_SECONDS, MIN_WORDS_TO_SUMMARIZE, EMBEDDING_MODEL, LLM_MODEL_SUMMARY
 except Exception:
     from config import SILENCE_CHECK_INTERVAL, SILENCE_THRESHOLD_SECONDS, MIN_WORDS_TO_SUMMARIZE, EMBEDDING_MODEL, LLM_MODEL_SUMMARY
+
+# Simple in-memory cache for today_summary (avoids hammering ollama every poll)
+_today_summary_cache: Dict[str, dict] = {}  # { user_id: { "summary": str, "cached_at": float, "meta": dict } }
+TODAY_SUMMARY_TTL = 300  # re-generate every 5 minutes
 
 # Runtime memory structures
 chroma_client = None
@@ -205,11 +210,12 @@ async def get_mood(user_id: str):
             return {
                 "label": "No data yet",
                 "sub": "Start talking to Memonic",
-                "emotion": "neu",
+                "emotion": "Neutral",
                 "indicator_position": 0.5,
-                "distribution": {"Happy": 0, "Neutral": 0, "Sad": 0, "Angry": 0}
+                "distribution": {"Happy": 0, "Neutral": 0, "Sad": 0, "Angry": 0},
+                "hourly_moods": [],
             }
-        
+
         results = chroma_collection.get(where={"user_id": user_id})
         metadatas = results.get("metadatas", [])
 
@@ -217,16 +223,19 @@ async def get_mood(user_id: str):
             return {
                 "label": "No data yet",
                 "sub": "Start talking to Memonic",
-                "emotion": "neu",
+                "emotion": "Neutral",
                 "indicator_position": 0.5,
-                "distribution": {"Happy": 0, "Neutral": 0, "Sad": 0, "Angry": 0}
+                "distribution": {"Happy": 0, "Neutral": 0, "Sad": 0, "Angry": 0},
+                "hourly_moods": [],
             }
 
+        from collections import Counter, defaultdict
+
         # Pull emotions from today's entries only
-        today = time.time() - 86400  # last 24 hours
+        today_cutoff = time.time() - 86400
         recent_emotions = [
             m["emotion"] for m in metadatas
-            if m.get("timestamp", 0) > today and m.get("emotion") and m["emotion"] != "Unknown"
+            if m.get("timestamp", 0) > today_cutoff and m.get("emotion") and m["emotion"] != "Unknown"
         ]
 
         # Fall back to last 20 if no entries today
@@ -240,13 +249,12 @@ async def get_mood(user_id: str):
             return {
                 "label": "No data yet",
                 "sub": "Start talking to Memonic",
-                "emotion": "neu",
+                "emotion": "Neutral",
                 "indicator_position": 0.5,
-                "distribution": {"Happy": 0, "Neutral": 0, "Sad": 0, "Angry": 0}
+                "distribution": {"Happy": 0, "Neutral": 0, "Sad": 0, "Angry": 0},
+                "hourly_moods": [],
             }
 
-        # Count distribution
-        from collections import Counter
         counts = Counter(recent_emotions)
         total = len(recent_emotions)
         distribution = {
@@ -255,20 +263,40 @@ async def get_mood(user_id: str):
             "Sad":     round(counts.get("Sad", 0)     / total * 100),
             "Angry":   round(counts.get("Angry", 0)   / total * 100),
         }
-
-        # Dominant emotion
         dominant = counts.most_common(1)[0][0]
 
-        # Map emotion → indicator position (0.0 = calm left, 1.0 = stressed right)
-        position_map = {
-            "Happy":   0.15,
-            "Neutral": 0.50,
-            "Sad":     0.70,
-            "Angry":   0.92,
-        }
+        position_map = {"Happy": 0.15, "Neutral": 0.50, "Sad": 0.70, "Angry": 0.92}
         indicator_position = position_map.get(dominant, 0.5)
 
-        # Human-readable label
+        # ── Hourly mood breakdown (for the bar chart in home.js) ──────────
+        emotion_to_val = {"Happy": 0.2, "Neutral": 0.5, "Sad": 0.7, "Angry": 0.9}
+        hourly_buckets = defaultdict(list)
+        now_ts = time.time()
+
+        for m in metadatas:
+            ts = m.get("timestamp", 0)
+            emo = m.get("emotion", "")
+            if ts > today_cutoff and emo and emo != "Unknown":
+                hour = int((ts % 86400) / 3600)
+                hourly_buckets[hour].append(emo)
+
+        hourly_moods = []
+        for hour in sorted(hourly_buckets.keys()):
+            bucket = hourly_buckets[hour]
+            dom_emo = Counter(bucket).most_common(1)[0][0]
+            ampm = "a" if hour < 12 else "p"
+            label = f"{hour % 12 or 12}{ampm}"
+            hourly_moods.append({
+                "time": label,
+                "emotion": dom_emo,
+                "val": emotion_to_val.get(dom_emo, 0.5),
+            })
+
+        if not hourly_moods:
+            cur_hour = int((now_ts % 86400) / 3600)
+            ampm = "a" if cur_hour < 12 else "p"
+            hourly_moods = [{"time": f"{cur_hour % 12 or 12}{ampm}", "emotion": dominant, "val": emotion_to_val.get(dominant, 0.5)}]
+
         label_map = {
             "Happy":   "Happy & Energized",
             "Neutral": "Calm & Focused",
@@ -281,13 +309,7 @@ async def get_mood(user_id: str):
             "Sad":     f"Take it easy — detected across {counts.get('Sad', 0)} entries",
             "Angry":   f"High stress — {counts.get('Angry', 0)} tense moments detected",
         }
-
-        emoji_map = {
-            "Happy":   "😊",
-            "Neutral": "😌",
-            "Sad":     "😔",
-            "Angry":   "😤",
-        }
+        emoji_map = {"Happy": "😊", "Neutral": "😌", "Sad": "😔", "Angry": "😤"}
 
         return {
             "label": label_map.get(dominant, "Neutral"),
@@ -296,7 +318,98 @@ async def get_mood(user_id: str):
             "emoji": emoji_map.get(dominant, "😌"),
             "indicator_position": indicator_position,
             "distribution": distribution,
+            "hourly_moods": hourly_moods,
         }
 
     except Exception as e:
         return {"error": str(e)}
+
+
+async def today_summary(user_id: str, db_session=None) -> dict:
+    """
+    Generate a warm daily recap from today's Memory rows in SQLite.
+    Cached for TODAY_SUMMARY_TTL seconds to avoid hammering ollama on every poll.
+    Pass db_session=<SQLAlchemy Session> from the API caller.
+    """
+    cached = _today_summary_cache.get(user_id)
+    if cached and (time.time() - cached.get("cached_at", 0)) < TODAY_SUMMARY_TTL:
+        return cached
+
+    fallback = {
+        "summary": "Start talking to Memonic to see your daily recap.",
+        "total_memories": 0,
+        "speakers_seen": [],
+        "dominant_emotion": "Neutral",
+        "emoji": "😌",
+        "time_range": None,
+        "updated_at": time.time(),
+    }
+
+    if db_session is None:
+        return fallback
+
+    try:
+        from core.models import Memory
+        from datetime import date, time as dtime
+
+        today_start = datetime.combine(date.today(), dtime.min)
+        memories = (
+            db_session.query(Memory)
+            .filter(Memory.timestamp >= today_start)
+            .order_by(Memory.timestamp.asc())
+            .all()
+        )
+
+        if not memories:
+            _today_summary_cache[user_id] = {**fallback, "cached_at": time.time()}
+            return fallback
+
+        transcripts = [m.transcript or "" for m in memories if m.transcript]
+        speakers = list({m.speaker for m in memories if m.speaker and m.speaker.lower() not in ("unknown", "")})
+        emotions = [m.emotion for m in memories if m.emotion and m.emotion != "Unknown"]
+        first_ts = memories[0].timestamp
+        last_ts = memories[-1].timestamp
+
+        from collections import Counter
+        dom_emotion = Counter(emotions).most_common(1)[0][0] if emotions else "Neutral"
+        emoji_map = {"Happy": "😊", "Neutral": "😌", "Sad": "😔", "Angry": "😤"}
+
+        time_range = None
+        try:
+            time_range = f"{first_ts.strftime('%-I:%M %p')} - {last_ts.strftime('%-I:%M %p')}"
+        except Exception:
+            time_range = None
+
+        joined = "\n".join(f"- {t}" for t in transcripts[-10:])
+        prompt = (
+            f"You are Memonic, a personal memory assistant. The user had {len(memories)} voice memories today.\n"
+            f"Speakers: {', '.join(speakers) if speakers else 'unknown'}. Mood: {dom_emotion}.\n\n"
+            f"Memories:\n{joined}\n\n"
+            f"Write a warm, personal 2-sentence summary of what happened today. "
+            f"Mention key themes or speakers. Under 40 words. No bullet points."
+        )
+
+        try:
+            resp = ollama.chat(model=LLM_MODEL_SUMMARY, messages=[{"role": "user", "content": prompt}])
+            summary_text = resp["message"]["content"].strip()
+        except Exception:
+            summary_text = (
+                f"You had {len(memories)} voice memories today"
+                + (f" with {', '.join(speakers)}." if speakers else ".")
+            )
+
+        result = {
+            "summary": summary_text,
+            "total_memories": len(memories),
+            "speakers_seen": speakers,
+            "dominant_emotion": dom_emotion,
+            "emoji": emoji_map.get(dom_emotion, "😌"),
+            "time_range": time_range,
+            "updated_at": time.time(),
+            "cached_at": time.time(),
+        }
+        _today_summary_cache[user_id] = result
+        return result
+
+    except Exception as e:
+        return {**fallback, "error": str(e)}

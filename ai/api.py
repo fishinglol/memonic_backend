@@ -1,5 +1,6 @@
 import os
 import glob
+import shutil
 import tempfile
 import numpy as np
 import time
@@ -9,10 +10,28 @@ import torch
 import torchaudio
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 import logging
 from pydantic import BaseModel
 from typing import List
+
+# ── Audio archive setup ───────────────────────────────────────────
+AUDIO_ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "..", "audio_archive")
+os.makedirs(AUDIO_ARCHIVE_DIR, exist_ok=True)
+
+def _archive_wav(src_path: str, speaker: str = "unknown") -> str:
+    """Copy a WAV file into audio_archive/ and return the relative filename."""
+    ts = int(datetime.utcnow().timestamp())
+    safe_speaker = (speaker or "unknown").replace(" ", "_").replace("/", "_")
+    filename = f"{ts}_{safe_speaker}.wav"
+    dest = os.path.join(AUDIO_ARCHIVE_DIR, filename)
+    try:
+        shutil.copy2(src_path, dest)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Archive copy failed: {e}")
+        return ""
+    return filename
 
 # ── VAD — energy-based utterance splitter ────────────────────
 # Runs on server so ESP32 just streams forever (no RAM cost on device)
@@ -217,13 +236,15 @@ async def process_audio(file: UploadFile = File(...), enroll_user: str = Form(No
         # Step 4: Emotion
         emotion = get_emotion(temp_file.name)
         
-        # Step 5: Save to SQLite table "memories"
+        # Step 5: Save to SQLite table "memories" + archive the WAV
         timestamp = datetime.utcnow()
+        archived_filename = _archive_wav(temp_file.name, speaker)
         new_memory = Memory(
             transcript=transcript,
             speaker=speaker,
             emotion=emotion,
-            timestamp=timestamp
+            timestamp=timestamp,
+            audio_path=archived_filename or None,
         )
         db.add(new_memory)
         db.commit()
@@ -433,11 +454,13 @@ async def websocket_audio(websocket: WebSocket, db: Session = Depends(get_db)):
                         transcript = transcribe_audio(temp_file.name)
                         speaker    = identify_speaker(temp_file.name)
                         emotion    = get_emotion(temp_file.name)
+                        archived_filename = _archive_wav(temp_file.name, speaker)
                         new_memory = Memory(
                             transcript=transcript,
                             speaker=speaker,
                             emotion=emotion,
                             timestamp=datetime.utcnow(),
+                            audio_path=archived_filename or None,
                         )
                         db.add(new_memory)
                         db.commit()
@@ -664,10 +687,14 @@ async def voice_test():
 
 
 @router.get("/api/memories")
-def get_memories(limit: int = 20, db: Session = Depends(get_db)):
+def get_memories(limit: int = 20, after_id: int = 0, db: Session = Depends(get_db)):
+    """Fetch recent memories. Use after_id for efficient real-time polling (returns only id > after_id)."""
     limit = min(max(1, limit), 100)
     try:
-        memories = db.query(Memory).order_by(Memory.timestamp.desc()).limit(limit).all()
+        q = db.query(Memory)
+        if after_id > 0:
+            q = q.filter(Memory.id > after_id)
+        memories = q.order_by(Memory.timestamp.desc()).limit(limit).all()
         return {
             "memories": [
                 {
@@ -675,7 +702,8 @@ def get_memories(limit: int = 20, db: Session = Depends(get_db)):
                     "transcript": m.transcript,
                     "speaker": m.speaker,
                     "emotion": m.emotion,
-                    "timestamp": m.timestamp.isoformat() if m.timestamp else None
+                    "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                    "audio_path": m.audio_path or None,
                 }
                 for m in memories
             ]
@@ -683,6 +711,26 @@ def get_memories(limit: int = 20, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Error fetching memories: {e}")
         raise HTTPException(status_code=500, detail={"status": "error", "message": str(e)})
+
+
+@router.get("/api/audio/{filename}")
+def serve_audio(filename: str):
+    """Serve a saved WAV file from audio_archive/."""
+    # Security: only allow safe filenames (no path traversal)
+    safe = os.path.basename(filename)
+    path = os.path.join(AUDIO_ARCHIVE_DIR, safe)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    return FileResponse(path, media_type="audio/wav", filename=safe)
+
+
+@router.get("/api/today-summary/{user_id}")
+async def get_today_summary(user_id: str, refresh: bool = False, db: Session = Depends(get_db)):
+    """LLM-generated daily recap from today's voice memories. Cached 5 minutes."""
+    if refresh:
+        memory._today_summary_cache.pop(user_id, None)
+    result = await memory.today_summary(user_id, db_session=db)
+    return result
 
 
 # ── DASHBOARD & AI ENDPOINTS ──────────────────────────────────────

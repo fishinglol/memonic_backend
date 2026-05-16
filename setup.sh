@@ -7,8 +7,9 @@ cd "$(dirname "$0")"
 echo "🚀 Updating and Setting up Memonic on Lightning AI..."
 
 
-# 1. Update code
-git pull
+# 1. Update code — always use rebase to avoid divergent-branch errors
+git config pull.rebase true
+git pull --rebase
 
 # 2. Check and Install Ollama if missing
 if ! command -v ollama &> /dev/null; then
@@ -28,9 +29,9 @@ echo "📥 Checking AI models..."
 ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 
-# 5. Python Dependencies
-# Using --break-system-packages as requested for Lightning AI environment
-pip install speechbrain faster-whisper transformers mem0ai --upgrade --break-system-packages
+# 5. Python Dependencies — install from requirements.txt so versions stay in sync
+echo "📦 Installing Python dependencies..."
+pip install -r requirements.txt --quiet
 
 # 6. Kill old session, create fresh one
 tmux kill-session -t $SESSION 2>/dev/null

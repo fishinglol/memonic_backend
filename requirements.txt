@@ -6,11 +6,11 @@ python-multipart==0.0.6
 httpx>=0.25.0
 
 # ── Database ──────────────────────────────────────────────────────
-sqlalchemy==2.0.23
+sqlalchemy>=2.0.23          # was 2.0.23 — mem0ai needs >=2.0.31
 pydantic>=2.7.3
 
 # ── AI / Audio Models ─────────────────────────────────────────────
-faster-whisper==0.10.0
+faster-whisper>=1.0.0       # was 0.10.0 — Lightning already has 1.2.1; 0.10.0 pulls old huggingface-hub
 torch==2.1.1
 torchaudio==2.1.1
 numpy==1.26.2

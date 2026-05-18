@@ -329,13 +329,43 @@ async def _process_utterance(audio_bytes: bytes, db: Session):
             logger.debug("VAD-gate: empty transcript, skipping")
             return
 
-        # 3. Speaker + emotion in parallel (both heavy)
+        # 3. Speaker diarization + emotion in parallel
+        #    If utterance > 6s, split into 4s chunks to detect multiple speakers
+        CHUNK_SAMPLES   = 16000 * 4   # 4s @ 16kHz
+        CHUNK_BYTES     = CHUNK_SAMPLES * 2
+        n_chunks        = max(1, len(audio_bytes) // CHUNK_BYTES)
+
+        async def _diarize() -> str:
+            if n_chunks <= 1:
+                return await asyncio.to_thread(identify_speaker, temp_file.name)
+            # Write each chunk as a temp WAV, identify speaker, collect unique names
+            chunk_speakers = []
+            for i in range(n_chunks):
+                chunk = audio_bytes[i * CHUNK_BYTES: (i + 1) * CHUNK_BYTES]
+                if len(chunk) < 8000: continue   # skip tiny tail
+                tf = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                try:
+                    def _wc(fname=tf.name, c=chunk):
+                        with wave.open(fname, "wb") as wf:
+                            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+                            wf.writeframes(c)
+                    await asyncio.to_thread(_wc)
+                    spk = await asyncio.to_thread(identify_speaker, tf.name)
+                    chunk_speakers.append(spk)
+                finally:
+                    if os.path.exists(tf.name): os.remove(tf.name)
+            # Deduplicate preserving order
+            seen = set(); ordered = []
+            for s in chunk_speakers:
+                if s not in seen: seen.add(s); ordered.append(s)
+            return ", ".join(ordered) if ordered else "Unknown"
+
         speaker, emotion = await asyncio.gather(
-            asyncio.to_thread(identify_speaker, temp_file.name),
-            asyncio.to_thread(get_emotion,     temp_file.name),
+            _diarize(),
+            asyncio.to_thread(get_emotion, temp_file.name),
         )
 
-        # 4. DB write (light, but still off-loop to be safe)
+        # 4. DB write
         def _save():
             new_memory = Memory(
                 transcript=transcript,
@@ -713,6 +743,25 @@ def get_memories(limit: int = 20, after_id: int = 0, db: Session = Depends(get_d
         raise HTTPException(status_code=500, detail={"status": "error", "message": str(e)})
 
 
+@router.delete("/api/memories/{memory_id}")
+def delete_memory(memory_id: int, db: Session = Depends(get_db)):
+    """Delete a memory and its associated audio file."""
+    mem = db.query(Memory).filter(Memory.id == memory_id).first()
+    if not mem:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    # Remove WAV from disk
+    if mem.audio_path:
+        wav = os.path.join(AUDIO_ARCHIVE_DIR, os.path.basename(mem.audio_path))
+        try:
+            if os.path.exists(wav):
+                os.remove(wav)
+        except Exception as e:
+            logger.warning(f"Could not delete audio file {wav}: {e}")
+    db.delete(mem)
+    db.commit()
+    return {"status": "deleted", "id": memory_id}
+
+
 @router.get("/api/audio/{filename}")
 def serve_audio(filename: str):
     """Serve a saved WAV file from audio_archive/."""
@@ -831,6 +880,37 @@ async def test_seed_memory(req: SeedMemoryRequest):
         except Exception as e:
             logger.error(f"seed error: {e}")
     return {"status": "ok", "saved": saved, "user_id": req.user_id}
+
+
+@router.post("/api/enroll-from-memory/{memory_id}")
+async def enroll_from_memory(memory_id: int, enroll_name: str, db: Session = Depends(get_db)):
+    """
+    Enroll a speaker using an already-saved audio archive file.
+    Tap any memory card in Voice History → assign a name → done.
+    Supports centroid averaging (call multiple times with same name).
+    """
+    from core.models import Memory as MemoryModel
+    mem = db.query(MemoryModel).filter(MemoryModel.id == memory_id).first()
+    if not mem:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if not mem.audio_path:
+        raise HTTPException(status_code=400, detail="This memory has no saved audio file")
+
+    audio_file = os.path.join(AUDIO_ARCHIVE_DIR, os.path.basename(mem.audio_path))
+    if not os.path.exists(audio_file):
+        raise HTTPException(status_code=404, detail="Audio file missing on disk")
+
+    try:
+        embedding = await asyncio.to_thread(models.get_embedding, audio_file)
+        models.save_profile(enroll_name, embedding)
+        # Update speaker label on this memory row
+        mem.speaker = enroll_name
+        db.commit()
+        logger.info(f"Enrolled '{enroll_name}' from memory #{memory_id}")
+        return {"status": "ok", "message": f"Enrolled {enroll_name} from memory #{memory_id}"}
+    except Exception as e:
+        logger.error(f"enroll-from-memory error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Mount router AFTER all routes are registered ─────────────────

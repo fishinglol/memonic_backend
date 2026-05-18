@@ -310,6 +310,13 @@ def transcribe(signal: torch.Tensor) -> str:
     if _whisper is None:
         return ""
     signal_np = signal.squeeze().cpu().numpy()
-    segments, info = _whisper.transcribe(signal_np, beam_size=5, language="en")
+    # Auto-detect language — supports Thai, English, Chinese and all others
+    segments, info = _whisper.transcribe(
+        signal_np,
+        beam_size=5,
+        language=None,                   # auto-detect
+        condition_on_previous_text=False, # more accurate per-utterance
+    )
+    print(f"🗣️  Detected language: {info.language} ({info.language_probability:.0%})")
     text = " ".join([seg.text for seg in list(segments)]).strip()
     return text
